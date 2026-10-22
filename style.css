@@ -116,7 +116,6 @@
 /* 第二十七轮 R2：查看器工具栏的下拉菜单挂在 body 上（不在任何窗口里）→ 暗色要自带一份变量 */
 .hh-menu[data-theme="dark"],
 #hide-helper-chat-stats-popup[data-theme="dark"],
-#hide-helper-context-viewer[data-theme="dark"],
 .hide-modal-overlay[data-theme="dark"], 
 .hide-helper-notification-popup[data-theme="dark"] {
     --hh-background-popup: var(--dark-background-popup);
@@ -878,222 +877,8 @@ html.hh-theme-switching::view-transition-new(root) {
 #token-stats-panel .tub-stat-box-over-budget .tub-stat-value,
 #token-stats-panel .tub-stat-box-over-budget small { color: var(--hh-stats-color-ejs) !important; }
 
-/* ==================== 完整上下文查看器（仅内存快照） ==================== */
-/* 与条目详情子窗同款：尺寸/位置由 JS（positionChildPopup）内联写入、与主窗一致并贴其右侧。
-   结构同条目详情子窗（头部固定 + 内容区滚动），故 .hide-entry-head / .hide-entry-body 的规则也要给一份。 */
-/* ⚠️ width/max-width/max-height 绝不能加 !important（!important 会盖掉 JS 内联写入的尺寸）。 */
-#hide-helper-context-viewer {
-    width: auto; max-width: none; max-height: none;
-    z-index: 10000 !important; /* 与条目详情子窗同级：高于主弹窗 */
-    gap: 12px !important; overflow: hidden !important;
-}
-#hide-helper-context-viewer .hide-entry-head {
-    display: flex !important; flex-direction: column !important; gap: 4px !important;
-    padding: 0 0 10px !important; border-bottom: 1px solid var(--hh-border-color) !important;
-    flex: 0 0 auto !important;
-}
-#hide-helper-context-viewer .hide-entry-name {
-    color: var(--hh-text-primary) !important; font-size: 16px !important; font-weight: 600 !important;
-    padding-right: 26px !important;
-}
-/* 内容区滚动：外层 .hide-helper-popup 已有 20px 25px 内边距，故这里 padding 归零（不重复加左右内边距）。 */
-/* 内容区滚动：子窗必须保持 flex 纵向布局，.hide-entry-body 的 flex:1 1 auto 才会生效、
-   才会被父级固定高度约束并出现滚动条。滚动条与**条目详情子窗同款**：默认整条隐藏（轨道+滑块透明），
-   三档颜色由 JS（initHiddenScrollbar）打的 .hh-sb-scrolling / .hh-sb-hover / .hh-sb-dragging 驱动；
-   标准属性（scrollbar-color）与 WebKit 伪元素两套写法同步取值，浏览器认哪套都一致。 */
-#hide-helper-context-viewer .hide-entry-body {
-    flex: 1 1 auto !important; overflow-y: auto !important; min-height: 0 !important;
-    padding: 0 !important;
-    scrollbar-width: thin !important;
-    scrollbar-color: transparent transparent !important;
-}
-#hide-helper-context-viewer .hide-entry-body * { scrollbar-width: none !important; }
-/* WebKit：轨道透明、去掉平台自带的「首尾倒三角按钮」、滑块默认透明（= 隐藏） */
-#hide-helper-context-viewer .hide-entry-body::-webkit-scrollbar { display: block !important; width: 8px !important; height: 8px !important; }
-#hide-helper-context-viewer .hide-entry-body::-webkit-scrollbar-track { background: transparent !important; }
-#hide-helper-context-viewer .hide-entry-body::-webkit-scrollbar-button {
-    display: none !important; width: 0 !important; height: 0 !important;
-}
-#hide-helper-context-viewer .hide-entry-body::-webkit-scrollbar-thumb {
-    background: transparent !important; border-radius: 4px !important;
-}
-/* ① 滚动中（浅） */
-#hide-helper-context-viewer .hide-entry-body.hh-sb-scrolling { scrollbar-color: var(--hh-scrollbar-thumb-faint) transparent !important; }
-#hide-helper-context-viewer .hide-entry-body.hh-sb-scrolling::-webkit-scrollbar-thumb {
-    background: var(--hh-scrollbar-thumb-faint) !important;
-}
-/* ② 鼠标在滚动条上（深一档）—— 含 WebKit 的滑块 :hover 兜底 */
-#hide-helper-context-viewer .hide-entry-body.hh-sb-hover { scrollbar-color: var(--hh-scrollbar-thumb) transparent !important; }
-#hide-helper-context-viewer .hide-entry-body.hh-sb-hover::-webkit-scrollbar-thumb,
-#hide-helper-context-viewer .hide-entry-body::-webkit-scrollbar-thumb:hover {
-    background: var(--hh-scrollbar-thumb) !important;
-}
-/* ③ 按住/拖拽（最深）—— 必须排在 ①② 之后 */
-#hide-helper-context-viewer .hide-entry-body.hh-sb-dragging { scrollbar-color: var(--hh-scrollbar-thumb-hover) transparent !important; }
-#hide-helper-context-viewer .hide-entry-body.hh-sb-dragging::-webkit-scrollbar-thumb,
-#hide-helper-context-viewer .hide-entry-body::-webkit-scrollbar-thumb:active {
-    background: var(--hh-scrollbar-thumb-hover) !important;
-}
-#hide-helper-context-viewer .hide-helper-popup-close-icon {
-    position: absolute; top: 6px; right: 5px; width: 30px; border: none; background: none;
-    color: var(--hh-text-secondary); font-size: 25px; line-height: 1; cursor: pointer;
-    transition: color 0.2s ease, transform 0.2s ease; padding: 0;
-    display: flex; align-items: center; justify-content: center;
-}
-#hide-helper-context-viewer .hide-helper-popup-close-icon:hover { color: var(--hh-text-primary); transform: rotate(90deg); }
-/* 除内容区滚动条外，该窗内其余滚动条一律隐藏（与条目详情子窗一致：.hc-msg-full 等内层容器仍可滚，
-   只是不显示滚动条）。后两条的具体性低于上面 .hide-entry-body 的规则，故不会把内容区滚动条也藏掉。 */
-#hide-helper-context-viewer ::-webkit-scrollbar { display: none !important; }
-#hide-helper-context-viewer * { scrollbar-width: none !important; }
-#hide-context-sub { font-size: 0.78em !important; color: var(--hh-text-secondary) !important; }
-#hide-helper-context-viewer .hc-list { display: flex; flex-direction: column; gap: 6px; }
-#hide-helper-context-viewer .hc-msg {
-    padding: 8px 10px; border-radius: 8px; background: var(--hh-background-secondary);
-    cursor: pointer; transition: background-color 0.15s ease;
-}
-#hide-helper-context-viewer .hc-msg:hover { background: var(--hh-btn-secondary-hover-bg); }
-#hide-helper-context-viewer .hc-msg-head {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.72em;
-}
-#hide-helper-context-viewer .hc-msg-idx { font-weight: 700; color: var(--hh-text-primary); flex: 0 0 auto; }
-#hide-helper-context-viewer .hc-msg-role {
-    flex: 0 0 auto; padding: 0 6px; border-radius: 4px; font-weight: 600;
-    background: var(--hh-input-bg); color: var(--hh-text-secondary);
-}
-#hide-helper-context-viewer .hc-msg-role-ai { background: var(--hh-stats-color-dynamic); color: var(--hh-color-white); }
-#hide-helper-context-viewer .hc-msg-role-user { background: var(--hh-stats-color-constant); color: var(--hh-color-white); }
-#hide-helper-context-viewer .hc-msg-kind { color: var(--hh-text-secondary); flex: 1 1 auto; min-width: 0; word-break: break-all; }
-#hide-helper-context-viewer .hc-msg-tokens { color: var(--hh-text-primary); font-weight: 600; flex: 0 0 auto; }
-#hide-helper-context-viewer .hc-msg-preview {
-    margin-top: 4px; font-size: 0.72em; color: var(--hh-text-secondary);
-    word-break: break-word; line-height: 1.5;
-}
-#hide-helper-context-viewer .hc-msg-full {
-    margin: 6px 0 0; padding: 8px; border-radius: 6px; background: var(--hh-input-bg);
-    font-size: 0.72em; color: var(--hh-text-primary); white-space: pre-wrap; word-break: break-word;
-    max-height: 300px; overflow-y: auto; font-family: inherit;
-}
-#hide-helper-context-viewer .hc-msg-empty { margin-top: 4px; font-size: 0.72em; color: var(--hh-text-secondary); font-style: italic; }
-
-/* ==================== 完整上下文查看器：检索 / 筛选 / 内部滚动区（§2.30） ==================== */
-/* 顶部工具栏（不参与滚动；第二十七轮 R2 重排）：
-   第一行 = 「来源」「角色」两个菜单按钮 + 显示条数 + 放大镜 + 目录图标；第二行（默认收起）= 检索框 + 命中数 + 上/下/橡皮擦。
-   ⚠️ 用户口径：**去掉工具栏下方的分割线**（原来那条 border-bottom）。 */
-#hide-helper-context-viewer .hc-toolbar {
-    flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px;
-    padding-bottom: 2px;
-}
-#hide-helper-context-viewer .hc-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 0.72em; }
-#hide-helper-context-viewer .hc-count { margin-left: auto; color: var(--hh-text-secondary); }
-/* 「来源 / 角色」菜单按钮：胶囊样式 + 右侧小三角（点开下拉菜单） */
-#hide-helper-context-viewer .hc-menu-btn {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 2px 8px !important; border-radius: 10px !important;
-    border: 1px solid var(--hh-border-color) !important; background: transparent !important;
-    color: var(--hh-text-secondary) !important; cursor: pointer;
-    font-size: 1em !important; line-height: 1.5 !important; font-family: inherit !important;
-}
-#hide-helper-context-viewer .hc-menu-btn:hover { color: var(--hh-text-primary) !important; border-color: var(--hh-accent-color) !important; }
-#hide-helper-context-viewer .hc-menu-btn.open,
-#hide-helper-context-viewer .hc-menu-btn.active { color: var(--hh-accent-color) !important; border-color: var(--hh-accent-color) !important; }
-#hide-helper-context-viewer .hc-menu-btn-label { color: inherit; }
-#hide-helper-context-viewer .hc-menu-btn-value { font-weight: 600; }
-#hide-helper-context-viewer .hc-menu-btn::after {
-    content: ''; width: 0; height: 0; margin-left: 1px;
-    border-left: 3px solid transparent; border-right: 3px solid transparent;
-    border-top: 4px solid currentColor; opacity: 0.75;
-}
-/* 检索行（默认收起，点放大镜展开） */
-#hide-helper-context-viewer .hc-search { display: flex; align-items: center; gap: 4px; }
-#hide-helper-context-viewer .hc-search-icon { flex: 0 0 auto; display: inline-flex; color: var(--hh-text-secondary); }
-#hide-helper-context-viewer .hc-search-input {
-    flex: 1 1 auto; min-width: 0; padding: 3px 6px !important; height: auto !important;
-    border: none !important; border-bottom: 1px solid var(--hh-border-color) !important;
-    background: transparent !important; color: var(--hh-text-primary) !important;
-    font-size: 0.78em !important; outline: none !important; box-sizing: border-box;
-}
-#hide-helper-context-viewer .hc-search-input:focus { border-bottom-color: var(--hh-accent-color) !important; }
-#hide-helper-context-viewer .hc-search-count { flex: 0 0 auto; font-size: 0.72em; color: var(--hh-text-secondary); }
-#hide-helper-context-viewer .hc-icon-btn {
-    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-    width: 20px; height: 20px; padding: 0 !important; border: none !important; background: none !important;
-    color: var(--hh-text-secondary) !important; cursor: pointer; border-radius: 5px;
-    font-size: 0.8em !important; line-height: 1 !important;
-    transition: color 0.15s ease, background-color 0.15s ease;
-}
-#hide-helper-context-viewer .hc-icon-btn:hover { color: var(--hh-accent-color) !important; background: var(--hh-tab-hover-bg) !important; }
-/* 放大镜：检索行开着时高亮（一眼看出"检索还开着 + 还有过滤词"） */
-#hide-helper-context-viewer .hc-icon-btn.active { color: var(--hh-accent-color) !important; background: var(--hh-tab-hover-bg) !important; }
-
-/* 查看器工具栏的下拉菜单（挂 body、fixed 定位：不会被窗口的 overflow:hidden 裁掉） */
-.hh-menu {
-    position: fixed; z-index: 10005; min-width: 88px; max-width: 220px;
-    display: flex; flex-direction: column; gap: 2px; padding: 6px;
-    background: var(--hh-background-popup); border: 1px solid var(--hh-border-color);
-    border-radius: 8px; box-shadow: 0 6px 18px var(--hh-color-black-shadow);
-    font-size: 12px; box-sizing: border-box;
-}
-.hh-menu-item {
-    display: block; width: 100%; text-align: left;
-    padding: 5px 8px !important; border: none !important; border-radius: 6px !important;
-    background: transparent !important; color: var(--hh-text-secondary) !important;
-    cursor: pointer; font-size: 1em !important; font-family: inherit !important; line-height: 1.4 !important;
-}
-.hh-menu-item:hover { background: var(--hh-tab-hover-bg) !important; color: var(--hh-text-primary) !important; }
-.hh-menu-item.active { background: var(--hh-text-primary) !important; color: var(--hh-stats-book) !important; }
-
-/* 命中高亮：全部命中浅底，当前命中深底（跳转目标一眼可见）；当前命中所在的行加左侧描边 */
-#hide-helper-context-viewer mark.hc-hit,
-#hide-helper-wi-msg-popup mark.hc-hit {
-    background: var(--hh-stats-bg-constant); color: var(--hh-text-primary);
-    border-radius: 2px; padding: 0 1px;
-}
-#hide-helper-context-viewer mark.hc-hit-current,
-#hide-helper-wi-msg-popup mark.hc-hit-current {
-    background: var(--hh-accent-color) !important; color: var(--hh-color-white) !important;
-    box-shadow: 0 0 0 1px var(--hh-accent-color);
-}
-#hide-helper-context-viewer .hc-msg-hit-current { box-shadow: inset 3px 0 0 0 var(--hh-accent-color); }
-
-/* 每条消息的内部滚动区：正文过长时在**消息内部**滚（滚动条默认隐藏 + 三档显色，与三个子窗同款）。
-   ⚠️ 下面两条必须带 !important：同一窗口里"其余滚动条一律隐藏"的两条用的是 `*` 选择器 **且带 !important**，
-     而 !important 的优先级高于特异度选择器——不加就会被压成 scrollbar-width: none，
-     三档显色随之完全失效（真实 Chromium 实测踩过）。 */
-#hide-helper-context-viewer .hc-msg-body {
-    margin-top: 4px; max-height: 148px; overflow-y: auto;
-    scrollbar-width: thin !important; scrollbar-color: transparent transparent !important;
-}
-#hide-helper-context-viewer .hc-msg-body * { scrollbar-width: none !important; }
-#hide-helper-context-viewer .hc-msg-body::-webkit-scrollbar { display: block !important; width: 8px !important; height: 8px !important; }
-#hide-helper-context-viewer .hc-msg-body::-webkit-scrollbar-track { background: transparent !important; }
-#hide-helper-context-viewer .hc-msg-body::-webkit-scrollbar-button { display: none !important; width: 0 !important; height: 0 !important; }
-#hide-helper-context-viewer .hc-msg-body::-webkit-scrollbar-thumb { background: transparent !important; border-radius: 4px !important; }
-#hide-helper-context-viewer .hc-msg-body.hh-sb-scrolling { scrollbar-color: var(--hh-scrollbar-thumb-faint) transparent !important; }
-#hide-helper-context-viewer .hc-msg-body.hh-sb-scrolling::-webkit-scrollbar-thumb { background: var(--hh-scrollbar-thumb-faint) !important; }
-#hide-helper-context-viewer .hc-msg-body.hh-sb-hover { scrollbar-color: var(--hh-scrollbar-thumb) transparent !important; }
-#hide-helper-context-viewer .hc-msg-body.hh-sb-hover::-webkit-scrollbar-thumb,
-#hide-helper-context-viewer .hc-msg-body::-webkit-scrollbar-thumb:hover { background: var(--hh-scrollbar-thumb) !important; }
-#hide-helper-context-viewer .hc-msg-body.hh-sb-dragging { scrollbar-color: var(--hh-scrollbar-thumb-hover) transparent !important; }
-#hide-helper-context-viewer .hc-msg-body.hh-sb-dragging::-webkit-scrollbar-thumb,
-#hide-helper-context-viewer .hc-msg-body::-webkit-scrollbar-thumb:active { background: var(--hh-scrollbar-thumb-hover) !important; }
-/* 内部滚动区已负责限高：摘要/全文自己的 margin/max-height 归零，避免"区中区"双重滚动 */
-#hide-helper-context-viewer .hc-msg-body .hc-msg-preview { margin-top: 0; }
-#hide-helper-context-viewer .hc-msg-body .hc-msg-full { margin: 0; max-height: none; overflow: visible; }
-
-/* 「本条内检索」行（点放大镜展开）：图标 + 输入 + 计数 + 上/下/关闭 */
-#hide-helper-context-viewer .hc-msg-search {
-    display: flex; align-items: center; gap: 4px; margin-top: 5px;
-    padding: 3px 5px; border-radius: 6px; background: var(--hh-input-bg);
-}
-#hide-helper-context-viewer .hc-msg-search-input {
-    flex: 1 1 auto; min-width: 0; padding: 2px 4px !important; height: auto !important;
-    border: none !important; border-bottom: 1px solid var(--hh-border-color) !important;
-    background: transparent !important; color: var(--hh-text-primary) !important;
-    font-size: 0.75em !important; outline: none !important; box-sizing: border-box;
-}
-#hide-helper-context-viewer .hc-msg-search-input:focus { border-bottom-color: var(--hh-accent-color) !important; }
-#hide-helper-context-viewer .hc-msg-search-count { flex: 0 0 auto; font-size: 0.7em; color: var(--hh-text-secondary); }
-
+/* 第二十九轮：原来的「完整上下文」查看器（#hide-helper-context-viewer）整套删除 —— 用户口径"内容太过重复"，
+   点「总共」直接显示「上下文目录 + 完整上下文」。它的工具栏样式（.hc-*）已镜像到 #hide-helper-ctx-outline-popup。 */
 /* ==================== 世界书消息条目来源子窗（网页中间，主弹窗最左，§2.30 / 第二十轮改落点） ==================== */
 /* 尺寸/位置由 JS（positionChildPopup side='center'）内联写入、与主窗一致（滚动条同款：默认隐藏 + 三档显色）。
    ⚠️ width/max-width/max-height 绝不能加 !important（会盖掉 JS 内联尺寸）。 */
@@ -1162,19 +947,9 @@ html.hh-theme-switching::view-transition-new(root) {
 #hide-helper-wi-msg-popup ::-webkit-scrollbar { display: none !important; }
 #hide-helper-wi-msg-popup * { scrollbar-width: none !important; }
 
-/* ==================== 工具栏「目录」图标（hc-filters 最右，第二十轮） ==================== */
-/* 用户口径：`hc-icon-btn hc-wi-expand` 放在 hc-filters **最右侧**（右对齐）。
-   .hc-count 自带 margin-left:auto，把筛选/计数这一串整体推到右侧，本图标排在其后即"最右"。 */
-#hide-helper-context-viewer .hc-filters .hc-wi-expand { margin-left: 2px; }
-/* 目录里点过的那条消息（右侧查看器里的目标行）：左侧描边 + 底色（与"当前命中"同一套视觉语言） */
-#hide-helper-context-viewer .hc-msg-target {
-    box-shadow: inset 3px 0 0 0 var(--hh-accent-color);
-    background: var(--hh-tab-hover-bg);
-}
-
-/* ==================== 上下文目录子窗（= 目录页；第二十七轮：与「合并内容」成对，贴它左侧） ==================== */
-/* 尺寸/位置由 JS（layoutOutlineMergePair）内联写入：目录贴在**合并内容窗左侧**（左边放不下 → 右侧 → 钳进视口），
-   合并内容窗沿用查看器原来的槽位。
+/* ==================== 上下文目录子窗（= 目录页；第二十七轮：与「完整上下文」成对，贴它左侧） ==================== */
+/* 尺寸/位置由 JS（layoutOutlineMergePair）内联写入：目录贴在**完整上下文窗左侧**（左边放不下 → 右侧 → 钳进视口），
+   完整上下文窗用它自己的槽位。
    ⚠️ width/max-width/max-height 绝不能加 !important（!important 会盖掉 JS 内联写入的尺寸）。 */
 #hide-helper-ctx-outline-popup {
     width: auto; max-width: none; max-height: none;
@@ -1188,9 +963,9 @@ html.hh-theme-switching::view-transition-new(root) {
     display: flex; align-items: center; justify-content: center; z-index: 6;
 }
 #hide-helper-ctx-outline-popup .hide-helper-popup-close-icon:hover { color: var(--hh-text-primary); transform: rotate(90deg); }
-/* 头部：与完整上下文查看器同款（固定不滚） */
+/* 头部：标题行 + 工具栏（第二十九轮：查看器的筛选/检索整套搬到这里；不再有副标题行） */
 #hide-helper-ctx-outline-popup .hide-entry-head {
-    display: flex !important; flex-direction: column !important; gap: 4px !important;
+    display: flex !important; flex-direction: column !important; gap: 6px !important;
     padding: 0 0 10px !important; border-bottom: 1px solid var(--hh-border-color) !important;
     flex: 0 0 auto !important;
 }
@@ -1198,7 +973,62 @@ html.hh-theme-switching::view-transition-new(root) {
     color: var(--hh-text-primary) !important; font-size: 16px !important; font-weight: 600 !important;
     padding-right: 26px !important;
 }
-#hide-helper-ctx-outline-popup .hide-entry-sub { font-size: 0.78em !important; color: var(--hh-text-secondary) !important; }
+/* 工具栏（第二十九轮口径②：整套从「完整上下文」查看器平移过来；`.hc-*` 的结构与查看器**完全一致**，
+   只是作用域从 `#hide-helper-context-viewer` 换成 `#hide-helper-ctx-outline-popup`）。 */
+#hide-helper-ctx-outline-popup .hc-toolbar {
+    flex: 0 0 auto !important; display: flex !important; flex-direction: column !important; gap: 6px !important;
+    padding-bottom: 2px !important;
+}
+#hide-helper-ctx-outline-popup .hc-filters {
+    display: flex !important; align-items: center !important; flex-wrap: wrap !important;
+    gap: 4px 8px !important; font-size: 0.72em !important;
+}
+#hide-helper-ctx-outline-popup .hc-count { margin-left: auto !important; color: var(--hh-text-secondary) !important; }
+#hide-helper-ctx-outline-popup .hc-menu-btn {
+    display: inline-flex !important; align-items: center !important; gap: 4px !important;
+    padding: 2px 8px !important; border-radius: 10px !important;
+    border: 1px solid var(--hh-border-color) !important; background: transparent !important;
+    color: var(--hh-text-secondary) !important; cursor: pointer !important;
+    font-size: 1em !important; line-height: 1.5 !important; font-family: inherit !important;
+}
+#hide-helper-ctx-outline-popup .hc-menu-btn:hover { color: var(--hh-text-primary) !important; border-color: var(--hh-accent-color) !important; }
+#hide-helper-ctx-outline-popup .hc-menu-btn.open,
+#hide-helper-ctx-outline-popup .hc-menu-btn.active { color: var(--hh-accent-color) !important; border-color: var(--hh-accent-color) !important; }
+#hide-helper-ctx-outline-popup .hc-menu-btn-label { color: inherit !important; }
+#hide-helper-ctx-outline-popup .hc-menu-btn-value { font-weight: 600 !important; }
+#hide-helper-ctx-outline-popup .hc-menu-btn::after {
+    content: ''; width: 0; height: 0; margin-left: 1px;
+    border-left: 3px solid transparent; border-right: 3px solid transparent;
+    border-top: 4px solid currentColor; opacity: 0.75;
+}
+#hide-helper-ctx-outline-popup .hc-search { display: flex !important; align-items: center !important; gap: 4px !important; }
+#hide-helper-ctx-outline-popup .hc-search-input {
+    flex: 1 1 auto !important; min-width: 0 !important; padding: 3px 6px !important; height: auto !important;
+    border: none !important; border-bottom: 1px solid var(--hh-border-color) !important;
+    background: transparent !important; color: var(--hh-text-primary) !important;
+    font-size: 0.78em !important; outline: none !important; box-sizing: border-box !important;
+}
+#hide-helper-ctx-outline-popup .hc-search-input:focus { border-bottom-color: var(--hh-accent-color) !important; }
+#hide-helper-ctx-outline-popup .hc-search-count { flex: 0 0 auto !important; font-size: 0.72em !important; color: var(--hh-text-secondary) !important; }
+#hide-helper-ctx-outline-popup .hc-icon-btn {
+    flex: 0 0 auto !important; display: inline-flex !important; align-items: center !important; justify-content: center !important;
+    width: 20px !important; height: 20px !important; padding: 0 !important; border: none !important; background: none !important;
+    color: var(--hh-text-secondary) !important; cursor: pointer !important; border-radius: 5px !important;
+    font-size: 0.8em !important; line-height: 1 !important;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+#hide-helper-ctx-outline-popup .hc-icon-btn:hover { color: var(--hh-accent-color) !important; background: var(--hh-tab-hover-bg) !important; }
+#hide-helper-ctx-outline-popup .hc-icon-btn.active { color: var(--hh-accent-color) !important; background: var(--hh-tab-hover-bg) !important; }
+/* 检索命中高亮（第二十九轮：从查看器平移）——目录行里的命中与"当前命中" */
+#hide-helper-ctx-outline-popup mark.hc-hit {
+    background: var(--hh-stats-bg-constant); color: var(--hh-text-primary);
+    border-radius: 2px; padding: 0 1px;
+}
+#hide-helper-ctx-outline-popup mark.hc-hit-current {
+    background: var(--hh-accent-color) !important; color: var(--hh-color-white) !important;
+    box-shadow: 0 0 0 1px var(--hh-accent-color);
+}
+#hide-helper-ctx-outline-popup .hco-hit-current { box-shadow: inset 3px 0 0 0 var(--hh-accent-color); }
 /* 内容区滚动：与其余子窗同款（默认隐藏 + 三档显色，由 initHiddenScrollbar 打 .hh-sb-* 驱动）。
    ⚠️ 下面两条 scrollbar-* 必须带 !important：本窗"其余滚动条一律隐藏"那条用的是 * 选择器且带
       !important，不加就会被压成 scrollbar-width:none、三档显色随之失效（完整上下文查看器实测踩过）。 */
@@ -1276,6 +1106,15 @@ html.hh-theme-switching::view-transition-new(root) {
     transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
 }
 #hide-helper-ctx-outline-popup .hco-jump:hover { opacity: 1; color: var(--hh-accent-color); background: var(--hh-tab-hover-bg); }
+/* 世界书消息行的「条目来源」图标（第二十九轮新增：查看器删除后，这个入口挪到目录里）——
+   与上面的 jump 图标同一套尺寸/交互，只是常态更显眼一点（它是这一行的唯一"二级入口"） */
+#hide-helper-ctx-outline-popup .hco-wi-src {
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 5px; cursor: pointer;
+    color: var(--hh-text-secondary); opacity: 0.7;
+    transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+#hide-helper-ctx-outline-popup .hco-wi-src:hover { opacity: 1; color: var(--hh-accent-color); background: var(--hh-tab-hover-bg); }
 /* 分组头：左侧一条短竖条 + 药丸标签，一眼区分"这是一组"而不是单条消息 */
 #hide-helper-ctx-outline-popup .hco-group-head { background: var(--hh-input-bg); }
 #hide-helper-ctx-outline-popup .hco-group-head::before {
@@ -1419,17 +1258,25 @@ html.hh-theme-switching::view-transition-new(root) {
     gap: 12px !important; overflow: hidden !important;
 }
 /* ⚠️ 本窗**没有**右上角关闭按钮（第二十七轮 R2 用户口径）：一对窗口由"目录的 × / Esc / 再点目录图标"收起。 */
-/* 头部：与目录 / 查看器同款（固定不滚） */
+/* 头部（第二十九轮口径③）：**一行** —— 标题在左，`.hide-entry-sub` 贴这一行的**最右侧**（右对齐）；
+   `.hcm-legend` 也在 sub 里、同样右对齐（见下）。窄窗口里放不下时自动换行，仍是右对齐。 */
 #hide-helper-ctx-merged-popup .hide-entry-head {
-    display: flex !important; flex-direction: column !important; gap: 4px !important;
+    display: flex !important; flex-direction: row !important; align-items: baseline !important;
+    flex-wrap: wrap !important; gap: 4px 10px !important;
     padding: 0 0 10px !important; border-bottom: 1px solid var(--hh-border-color) !important;
     flex: 0 0 auto !important;
 }
 #hide-helper-ctx-merged-popup .hide-entry-name {
     color: var(--hh-text-primary) !important; font-size: 16px !important; font-weight: 600 !important;
-    padding-right: 26px !important;
+    padding-right: 0 !important; flex: 0 0 auto !important;
 }
-#hide-helper-ctx-merged-popup .hide-entry-sub { font-size: 0.78em !important; color: var(--hh-text-secondary) !important; }
+/* sub 行：`margin-left: auto` 把它推到标题行最右（右对齐）；内部同样右对齐 + 允许折行 */
+#hide-helper-ctx-merged-popup .hide-entry-sub {
+    font-size: 0.78em !important; color: var(--hh-text-secondary) !important;
+    flex: 1 1 auto !important; min-width: 0 !important;
+    display: flex !important; flex-wrap: wrap !important; align-items: center !important;
+    justify-content: flex-end !important; text-align: right !important; gap: 4px 10px !important;
+}
 /* 内容区滚动：与其余子窗同款（默认隐藏 + 三档显色，由 initHiddenScrollbar 打 .hh-sb-* 驱动）。
    ⚠️ 下面两条 scrollbar-* 必须带 !important：本窗"其余滚动条一律隐藏"那条用的是 * 选择器且带
       !important，不加就会被压成 scrollbar-width:none、三档显色随之失效。 */
@@ -1486,16 +1333,30 @@ html.hh-theme-switching::view-transition-new(root) {
 #hide-helper-ctx-merged-popup .hcm-kind-wi-depth { border-left-color: var(--hcm-kind-wi-depth) !important; }
 #hide-helper-ctx-merged-popup .hcm-kind-wi-block,
 #hide-helper-ctx-merged-popup .hcm-kind-wi-merged { border-left-color: var(--hcm-kind-wi-block) !important; }
-/* 图例（头部 sub 行右侧）：R4 起固定「聊天 / 世界书 / 其他」三项，每项 = 色点 + 名称 + 条数 + tokens */
-#hide-helper-ctx-merged-popup .hcm-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; margin-left: 8px; }
+/* 图例（头部 sub 行内）：R4 起固定「聊天 / 世界书 / 其他」三项，每项 = 色点 + 名称 + 条数 + tokens。
+   第二十九轮口径③：随 sub 行一起**右对齐**（不再是"sub 里往后排一串"）。 */
+#hide-helper-ctx-merged-popup .hcm-legend {
+    display: inline-flex; flex-wrap: wrap; justify-content: flex-end;
+    gap: 4px 12px; margin-left: 0;
+}
 #hide-helper-ctx-merged-popup .hcm-legend-item { display: inline-flex; align-items: center; gap: 5px; color: var(--hh-text-secondary); font-variant-numeric: tabular-nums; }
 #hide-helper-ctx-merged-popup .hcm-legend-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--hcm-kind-other); flex: 0 0 auto; }
 /* 色点跟分块左色条同一套 3 组颜色（R4；此前只有 `.hcm-kind-*` 的 border-left-color 规则 → 三个点全是灰的） */
 #hide-helper-ctx-merged-popup .hcm-legend-dot.hcm-kind-chat { background: var(--hcm-kind-chat); }
 #hide-helper-ctx-merged-popup .hcm-legend-dot.hcm-kind-wi-after { background: var(--hcm-kind-wi-after); }
 #hide-helper-ctx-merged-popup .hcm-legend-dot.hcm-kind-other { background: var(--hcm-kind-other); }
-/* 目录里"最近跳到过"的那条：整块加描边环（左边缘已经被来源色条占用，故不再用那一条） */
-#hide-helper-ctx-merged-popup .hcm-chunk-target { box-shadow: inset 0 0 0 2px var(--hh-accent-color); }
+/* 目录里"最近跳到过"的那条（`.hcm-chunk-target`）——第二十九轮口径⑤重做：
+   用户口径：「左边依然显示对应的蓝色/绿色/灰色竖线，另外三边显示当前紫色的边框颜色，
+   而不是现在左边会有两种不同颜色的竖线叠在一起非常难看。」
+   ⚠️ 不用 `box-shadow: inset 0 0 0 2px`（整圈，会在左边缘把来源色条再叠一层），也不用真 border
+   （2px 边框会改变盒尺寸 → 高亮跳动时整篇文字横向位移）。改为**三条边各画一条内阴影**：
+   上 / 右 / 下 = accent 紫，左边**什么都不画** ⇒ 左边缘留着的就是 `.hcm-chunk` 自己的来源色条。 */
+#hide-helper-ctx-merged-popup .hcm-chunk-target {
+    box-shadow:
+        inset 0 2px 0 0 var(--hh-accent-color),
+        inset 0 -2px 0 0 var(--hh-accent-color),
+        inset -2px 0 0 0 var(--hh-accent-color);
+}
 
 /* ==================== 子窗落点：父窗原位 + 子窗在"另一侧"（第二十四轮） ==================== */
 /* 父窗**一动不动**（主窗 = 最高一级父窗，位置由插件自己管），子窗开在父窗的另一侧：
@@ -1508,14 +1369,12 @@ html.hh-theme-switching::view-transition-new(root) {
 #hide-helper-popup.hh-pair-under,
 #hide-helper-entry-popup.hh-pair-under,
 #hide-helper-chat-stats-popup.hh-pair-under,
-#hide-helper-context-viewer.hh-pair-under,
 #hide-helper-wi-msg-popup.hh-pair-under,
 #hide-helper-ctx-outline-popup.hh-pair-under,
 #hide-helper-ctx-merged-popup.hh-pair-under { z-index: 10000 !important; }
 #hide-helper-popup.hh-pair-front,
 #hide-helper-entry-popup.hh-pair-front,
 #hide-helper-chat-stats-popup.hh-pair-front,
-#hide-helper-context-viewer.hh-pair-front,
 #hide-helper-wi-msg-popup.hh-pair-front,
 #hide-helper-ctx-outline-popup.hh-pair-front,
 #hide-helper-ctx-merged-popup.hh-pair-front { z-index: 10001 !important; }
