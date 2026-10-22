@@ -5312,8 +5312,22 @@ function positionChildPopup(popupEl) {
 }
 
 // 视口变化：子窗重新落位（父窗不动）
+// ⚠️ 第二十九轮 R1：成对模式（目录居中 + 完整上下文贴右）的落点**完全依赖视口宽度**，
+//   窗口一改大小就必须重算，否则两窗会停在旧坐标、甚至跑出视口（实测：1536 → 900 后右窗跑到 1108）。
+//   `layoutChildPair()` 在成对模式下会转交 `layoutOutlineMergePair()`，故这里只要调它即可。
 function repositionChildPopups() {
     layoutChildPair();
+}
+
+// 全局只绑一次的窗口 resize 监听：任何子窗/成对窗口开着时都能跟随重排。
+// （原来只在「魔杖按钮打开主弹窗」时绑，demo / 控制台入口打开的窗口不跟随 —— 实测踩过）
+let ctxResizeBound = false;
+function ensureChildPopupResizeHandler() {
+    if (ctxResizeBound || typeof window.addEventListener !== 'function') return;
+    ctxResizeBound = true;
+    window.addEventListener('resize', () => {
+        if (pairCurrentId || ctxMergeMode) repositionChildPopups();
+    }, { passive: true });
 }
 
 function positionEntryPopup() {
@@ -5377,8 +5391,8 @@ async function buildEntryDetailHtml(entry, fallbackType, extra = {}) {
     const selectiveLogicLabels = { 0: '任一主键 + 任一次键', 1: '任一主键 + 全部次键', 2: '任一主键 + 非全部次键', 3: '任一主键 + 无次键' };
     const logicText = selectiveLogicLabels[Number(entry.selectiveLogic)] ?? '';
 
-    // 「插入位置」行 = 原 Position + Depth 合并（@D 显示 `系统/AI/用户 @D 深度`，其余显示固定位置名）
-    const positionText = entryInsertPositionText(entry);
+    // 第二十九轮 R1（口径⑤）：**不再显示「插入位置」行** —— 用户口径"条目详情里不显示它"。
+    //   位置信息仍可从条目列表行的第二行（`.tub-nli-pos`）看到，详情窗只保留关键词 / 顺序 / 递归 / UID·tokens / 内容。
     const orderText = Number(entry.order) || 0;
 
     // 「递归」行的两个只读勾选项：勾上=绿色（该项已生效），未勾=红色（该项未生效）。
@@ -5416,7 +5430,6 @@ async function buildEntryDetailHtml(entry, fallbackType, extra = {}) {
     const html = `
         ${row('关键词', keysHtml)}
         ${secKeys.length ? row('次关键词', secKeysHtml + (logicText ? `<span class="hide-entry-logic">（${logicText}）</span>` : '')) : ''}
-        ${row('插入位置', `<span class="hide-entry-plain">${escapeHtmlText(positionText)}</span>`)}
         ${row('顺序', `<span class="hide-entry-plain">${orderText}</span>`)}
         ${row('递归', recursionHtml)}
         ${metaRowHtml}
@@ -6569,7 +6582,13 @@ function bindContextOutlineToolbar(el) {
     const searchToggle = el.querySelector('#hco-search-toggle');
     const searchInput = el.querySelector('#hco-search-input');
     const applySearchRowState = (open) => {
-        if (searchRow) searchRow.style.display = open ? 'flex' : 'none';
+        // 第二十九轮 R1（口径①）：默认收起；点放大镜展开、再点收起。
+        // 用 class 驱动（CSS 侧 `.hc-search` 默认 `display:none`，`.hco-search-open` 才 `flex`）——
+        // 只写内联 `display` 会被样式表里的 `!important` 压掉（实测：检索行一直展开）。
+        if (searchRow) {
+            searchRow.style.display = open ? 'flex' : 'none';
+            searchRow.classList.toggle('hco-search-open', !!open);
+        }
         searchToggle?.classList.toggle('active', open);
         if (open) searchInput?.focus();
         else if (ctxSearchTerm.trim()) {
@@ -6628,6 +6647,8 @@ function bindContextOutlineToolbar(el) {
 // 「完整上下文」窗（内容区）：只展示内容，工具栏/导航全在左侧目录里。
 // 第二十九轮口径③：头部改成**一行** —— 标题在左、`.hide-entry-sub` 贴标题行**最右侧**（右对齐），
 //   图例（`.hcm-legend`）也从副标题行里提上来、同样右对齐（见 renderMergedContext）。
+// R1（口径②）：快照信息（`.hide-entry-book`）从副标题里**拆出来**，作为标题行的第二个孩子 ——
+//   它现在与「完整上下文」四个字**同一行**（窄窗只省略它自己，不会把整块挤到第二行）。
 function ensureContextMergedPopup() {
     let el = document.getElementById(CTX_MERGED_ID);
     if (el) return el;
@@ -6636,6 +6657,7 @@ function ensureContextMergedPopup() {
             <!-- 第二十七轮 R2 用户口径：**去掉右上角的关闭按钮**（一对窗口靠"目录的 × / Esc / 再点图标"收起） -->
             <div class="hide-entry-head hcm-head">
                 <div class="hide-entry-name" id="hcm-title">完整上下文</div>
+                <div class="hide-entry-book" id="hcm-book"></div>
                 <div class="hide-entry-sub" id="hcm-sub"></div>
             </div>
             <div class="hide-entry-body hcm-body" id="hcm-body"></div>
@@ -6706,6 +6728,7 @@ function toggleContextOutlinePopup(model) {
 function openContextOutlinePopup(model) {
     const outEl = ensureContextOutlinePopup();
     const mrgEl = ensureContextMergedPopup();
+    ensureChildPopupResizeHandler();   // 视口变化时这两个窗要跟着重排（目录居中 / 内容贴右）
     if (model !== undefined && model !== null) loadContextSnapshot(model);
     enterContextOutlineMergeMode();
     renderContextOutlineList();
@@ -6732,35 +6755,41 @@ function resumeOutlineMergeAfterChild() {
     layoutChildPair();
 }
 
-// 成对模式的落点（**唯一**写这两窗位置的地方）。用户口径："该弹窗（目录）显示在左侧。同时，右侧要出现一个同层级的弹窗"。
-//   ① 首选：合并内容窗 = 查看器原来的槽位（视线不用挪），目录贴在它**左侧**；
-//   ② 左边放不下：目录**留在查看器原来的槽位**、合并内容挪到它**右侧**（"目录在左、内容在右"这条不变）；
-//   ③ 两侧都放不下（窄屏）：两窗重叠在同一位置，目录压在**上层**。
+// 成对模式的落点（**唯一**写这两窗位置的地方）。
+// 第二十九轮 R1（用户口径③）：「上下文目录」**居中**，「完整上下文」**贴右侧**。
+//   ① 完整上下文窗贴右：`vw - w - PAIR_MARGIN`；
+//   ② 目录优先水平居中（`(vw - w) / 2`）；
+//   ③ 但**两窗绝不允许重叠**：居中后的目录右缘若会压到内容窗，就把目录**向左挪到刚好让开**
+//      （`outLeftMax = 内容窗左缘 - PAIR_GAP - w`）—— 宁可目录略偏左，也不叠窗口、也不把内容窗挪离右边缘；
+//   ④ 只有连"两窗并排"都放不下（`2w + PAIR_GAP > 可用宽度`）时，才退回"居中叠放、目录在上层"。
+// ⚠️ 实测（900px 宽 + 420px 窗）：2*420 + 12 = 852 ≤ 884 ⇒ 属于 ③，目录 `240 → 172`、内容窗仍在右边缘。
 function layoutOutlineMergePair() {
     const outEl = document.getElementById(CTX_OUTLINE_ID);
     const mrgEl = document.getElementById(CTX_MERGED_ID);
-    // 查看器已被收起（`display:none` 量不到尺寸），故落点用进入模式时记下的槽位
+    // 目录/内容两窗都用进入模式时记下的槽位（主弹窗的尺寸与顶部）
     const slot = ctxMergeViewerSlot || captureMainSlot() || { left: PAIR_MARGIN, top: PAIR_MARGIN, width: 420, height: 480 };
     const vw = window.innerWidth, vh = window.innerHeight;
     const w = slot.width, h = slot.height;
-    // 本模式里既有子窗可见 → 主弹窗一律让位（与两窗模型一致：屏幕上只有目录 + 合并内容）
+    // 本模式里既有子窗可见 → 主弹窗一律让位（屏幕上只有目录 + 完整上下文）
     setMainHiddenForPair(true);
-    const fitsAt = l => l >= PAIR_MARGIN && l + w <= vw - PAIR_MARGIN;
     const clampIn = l => Math.max(PAIR_MARGIN, Math.min(l, Math.max(PAIR_MARGIN, vw - w - PAIR_MARGIN)));
-    const outLeftNear = slot.left - w - PAIR_GAP;   // ① 目录在左、内容留在槽位
-    const mrgLeftAlt = slot.left + w + PAIR_GAP;    // ② 目录留在槽位、内容挪到右侧
-    let outLeft, mrgLeft, overlay = false;
-    if (fitsAt(outLeftNear)) {
-        outLeft = outLeftNear; mrgLeft = slot.left;
-    } else if (fitsAt(mrgLeftAlt)) {
-        outLeft = slot.left; mrgLeft = mrgLeftAlt;
+    // ① 内容窗贴右
+    const mrgLeft = vw - w - PAIR_MARGIN;
+    // ② 目录居中；③ 若会重叠则左移到刚好让开（让开优先于居中）
+    const centered = Math.round((vw - w) / 2);
+    const outLeftMax = mrgLeft - PAIR_GAP - w;          // 目录右缘不越过"内容窗左缘 - 间距"
+    let outLeft = Math.min(centered, outLeftMax);
+    let overlay = false;
+    if (outLeftMax < PAIR_MARGIN) {                      // ④ 两窗并排放不下 → 居中叠放，目录压上层
+        outLeft = clampIn(centered);
+        overlay = true;
     } else {
-        outLeft = clampIn(slot.left); mrgLeft = slot.left; overlay = true;
+        outLeft = clampIn(outLeft);
     }
     if (mrgEl) {
         mrgEl.style.width = w + 'px';
         mrgEl.style.height = h + 'px';
-        mrgEl.style.left = mrgLeft + 'px';
+        mrgEl.style.left = (overlay ? outLeft : mrgLeft) + 'px';
         mrgEl.style.top = slot.top + 'px';
     }
     if (!outEl) return;
@@ -6859,15 +6888,22 @@ function renderMergedContext() {
     const bodyEl = document.getElementById('hcm-body');
     if (!bodyEl) return;
     const subEl = document.getElementById('hcm-sub');
+    const bookEl = document.getElementById('hcm-book');
     const all = ctxDump?.messages || [];
     ctxMergedRenderToken += 1;
     ctxMergedRenderedUpTo = -1;
+    // 口径②：快照信息单独占标题行的一个格子（与标题同一行）；图例仍留在副标题行的最右侧。
+    if (bookEl) {
+        bookEl.textContent = ctxDump
+            ? `${ctxDump.source === 'simulate' ? '模拟发送' : '实际发送'} · ${all.length} 条消息 · 共 ${ctxDump.total} tokens`
+            : '';
+        bookEl.title = bookEl.textContent;
+    }
     if (subEl) {
         // 第二十九轮口径③：`.hide-entry-sub` 现在贴在标题行**最右侧**（右对齐），
         // 图例也从"副标题里的一串"改成"副标题里的一个右对齐块"（CSS：`.hcm-head` 是 flex + `margin-left:auto`）。
         subEl.innerHTML = ctxDump
-            ? `<span class="hide-entry-book">${ctxDump.source === 'simulate' ? '模拟发送' : '实际发送'} · ${all.length} 条消息 · 共 ${ctxDump.total} tokens</span>`
-                + `<span class="hcm-legend">${hcmLegendHtml(all)}</span>`
+            ? `<span class="hcm-legend">${hcmLegendHtml(all)}</span>`
             : '';
     }
     if (!all.length) {
@@ -7066,15 +7102,16 @@ function renderContextOutlineList() {
     const srcEntryBtn = (m) => (isWiKind(m.kind)
         ? `<span class="hco-wi-src" title="查看这条世界书消息的条目来源（饼图 + 条目列表）">${HC_ICON_WI}</span>`
         : '');
-    // 项头（独立消息 / 世界书消息）：折叠箭头 + messageID + 来源 + 跳转图标 + tokens（带 t）。
-    // 第二十八轮口径②：**不带角色 chip**；口径①：点头折叠、行尾图标跳转。
+    // 项头（独立消息 / 世界书消息）：折叠箭头 + messageID + 来源 + （世界书行）条目来源图标 + tokens（带 t）。
+    // 第二十八轮口径②：**不带角色 chip**；口径①：点头折叠。
+    // 第二十九轮 R1（口径④）：**去掉 `.hco-jump` 图标** —— 项头行本身已经是可点的（点空白处折叠/展开），
+    //   行尾那个"跳到正文"小箭头与"点聊天子行/条目行跳转"重复，且挤占 tokens 列，按用户口径删掉。
     const msgHeadHtml = (m) => `
             <div class="hco-head hco-row hco-collapsible" data-i="${m.i}" title="点击折叠/展开下方列表">
                 <span class="hco-caret">${HC_ICON_DOWN}</span>
                 ${mesidHtml(m)}
                 <span class="hco-src"${srcTitleAttr(m)}>${mark(srcOf(m))}</span>
                 ${srcEntryBtn(m)}
-                <span class="hco-jump" title="跳到右侧内容区里这条消息的第一行">${HC_ICON_JUMP}</span>
                 <span class="hco-tokens">${Number(m.tokens) || 0} t</span>
             </div>`;
     // 聊天子行（分组里的消息明细）：messageID + 角色 chip + 正文前 N 个字符 + tokens（不带 t）；无来源列
@@ -7120,12 +7157,11 @@ function renderContextOutlineList() {
             ? `<span class="hco-mesid hco-mesid-range" title="这组聊天消息的 messageID 区间">#${ids[0]}–#${ids[ids.length - 1]}</span>`
             : '';
         return `<div class="hco-item hco-group${ctxOutlineCollapsed.has(first.i) ? ' hco-collapsed' : ''}" data-i="${first.i}">
-                <div class="hco-head hco-group-head hco-collapsible" data-i="${first.i}" title="连续 ${g.items.length} 条「${label}」来源的消息（点击折叠/展开；点行尾箭头跳到第 ${first.i} 条）">
+                <div class="hco-head hco-group-head hco-collapsible" data-i="${first.i}" title="连续 ${g.items.length} 条「${label}」来源的消息（点击折叠/展开）">
                     <span class="hco-caret">${HC_ICON_DOWN}</span>
                     ${rangeHtml}
                     <span class="hco-pill">${escapeHtmlText(label + ' ' + g.items.length)}</span>
                     <span class="hco-src">连续 ${g.items.length} 条</span>
-                    <span class="hco-jump" title="跳到该组第一条消息的第一行">${HC_ICON_JUMP}</span>
                     <span class="hco-tokens">${tokensSum} t</span>
                 </div>
                 <div class="hco-kids hco-sublist">${g.items.map(m => msgKidHtml(m)).join('')}</div>
@@ -7137,9 +7173,8 @@ function renderContextOutlineList() {
     if (ctxHitCursor >= ctxHitCount) ctxHitCursor = ctxHitCount ? ctxHitCount - 1 : -1;
     updateCtxCounts();
 
-    // 交互（第二十八轮口径①）：
+    // 交互（第二十八轮口径①；第二十九轮 R1 去掉 `.hco-jump`）：
     //   · 项头 / 分组头（`.hco-collapsible`）→ 点击**折叠/展开**下方列表（不再直接跳转）；
-    //   · 行尾"跳到正文"图标（`.hco-jump`）→ 仍跳转到那条/那组消息的第一行（不冒泡，免得连带折叠）；
     //   · 世界书消息行尾的「条目来源」图标（`.hco-wi-src`）→ 开「条目来源」子窗；
     //   · 聊天子行（`.hco-kid.hco-row`）→ 点击跳到那条消息的第一行；
     //   · 条目行 → 滚到该条目正文的第一行。
@@ -7160,14 +7195,6 @@ function renderContextOutlineList() {
                 const row = icon.closest?.('.hco-row');
                 const ri = Number(row?.getAttribute?.('data-i'));
                 openWiMsgPopup(Number.isFinite(ri) ? ri : i);
-            };
-        });
-        item.querySelectorAll('.hco-jump').forEach(icon => {
-            icon.onclick = (ev) => {
-                ev.stopPropagation();   // 别让父行的"折叠"一起触发
-                const row = icon.closest?.('.hco-row');
-                const ri = Number(row?.getAttribute?.('data-i'));
-                jumpContextOutlineToMessage(Number.isFinite(ri) ? ri : i);
             };
         });
         item.querySelectorAll('.hco-kid.hco-row').forEach(row => {
