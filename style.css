@@ -1001,7 +1001,12 @@ html.hh-theme-switching::view-transition-new(root) {
     border-left: 3px solid transparent; border-right: 3px solid transparent;
     border-top: 4px solid currentColor; opacity: 0.75;
 }
-#hide-helper-ctx-outline-popup .hc-search { display: flex !important; align-items: center !important; gap: 4px !important; }
+/* 检索行（口径①，第二十九轮 R1）：**默认收起**，点放大镜展开、再点收起。
+   ⚠️ 这里不能给 `.hc-search` 写死 `display: flex !important` —— 内联的 `style="display:none"`
+   会被 `!important` 压掉，检索行就永远是展开的（本轮实测复现）。改由 `.hco-search-open` 控制：
+   默认 `display: none`，展开时由 JS 打上该类才 `flex`。 */
+#hide-helper-ctx-outline-popup .hc-search { display: none !important; align-items: center !important; gap: 4px !important; }
+#hide-helper-ctx-outline-popup .hc-search.hco-search-open { display: flex !important; }
 #hide-helper-ctx-outline-popup .hc-search-input {
     flex: 1 1 auto !important; min-width: 0 !important; padding: 3px 6px !important; height: auto !important;
     border: none !important; border-bottom: 1px solid var(--hh-border-color) !important;
@@ -1066,7 +1071,8 @@ html.hh-theme-switching::view-transition-new(root) {
    不显示任何序号；tokens 不带单位。
    ── 第二十八轮（用户六条口径）────────────────────────────────────────────────────────────
      ① 项头 / 分组头**可折叠**（行首 `.hco-caret` 箭头；`.hco-collapsed` 藏掉子项区）；它们右侧的
-        tokens **带单位 `t`**（JS 里写死），子行 / 条目行**不带**；行尾 `.hco-jump` 跳到那条消息；
+        tokens **带单位 `t`**（JS 里写死），子行 / 条目行**不带**；~~行尾 `.hco-jump` 跳到那条消息~~
+        （第二十九轮 R1 口径④已删）；
      ② 条目行 `.tub-nli-label` 不换行 + `.tub-nli-value` 固定最右（label 的 flex-basis 归 0，见下）；
      ③ 聊天子行没有来源列，中间是 `.hco-preview`（正文前 N 个字符，不换行）；`hco-role-ai` 浅灰底；
      ④ 项头 / 分组头**没有角色列**；
@@ -1098,16 +1104,9 @@ html.hh-theme-switching::view-transition-new(root) {
 #hide-helper-ctx-outline-popup .hco-caret svg { width: 10px; height: 10px; display: block; }
 #hide-helper-ctx-outline-popup .hco-collapsed .hco-caret { transform: rotate(-90deg); }
 #hide-helper-ctx-outline-popup .hco-collapsed .hco-kids { display: none; }
-/* 行尾"跳到正文"图标（第二十八轮口径①：折叠后仍要能跳到这条消息；与条目来源子窗的 jump 图标同款） */
-#hide-helper-ctx-outline-popup .hco-jump {
-    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-    width: 18px; height: 18px; border-radius: 5px; cursor: pointer;
-    color: var(--hh-text-secondary); opacity: 0.55;
-    transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
-}
-#hide-helper-ctx-outline-popup .hco-jump:hover { opacity: 1; color: var(--hh-accent-color); background: var(--hh-tab-hover-bg); }
-/* 世界书消息行的「条目来源」图标（第二十九轮新增：查看器删除后，这个入口挪到目录里）——
-   与上面的 jump 图标同一套尺寸/交互，只是常态更显眼一点（它是这一行的唯一"二级入口"） */
+/* 行尾"跳到正文"图标（`.hco-jump`）已按第二十九轮 R1 口径④**删除**（图标 + 绑定 + 样式）；
+   世界书消息行只剩「条目来源」这一个二级入口。 */
+/* 世界书消息行的「条目来源」图标（第二十九轮新增：查看器删除后，这个入口挪到目录里）—— */
 #hide-helper-ctx-outline-popup .hco-wi-src {
     flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
     width: 18px; height: 18px; border-radius: 5px; cursor: pointer;
@@ -1258,8 +1257,8 @@ html.hh-theme-switching::view-transition-new(root) {
     gap: 12px !important; overflow: hidden !important;
 }
 /* ⚠️ 本窗**没有**右上角关闭按钮（第二十七轮 R2 用户口径）：一对窗口由"目录的 × / Esc / 再点目录图标"收起。 */
-/* 头部（第二十九轮口径③）：**一行** —— 标题在左，`.hide-entry-sub` 贴这一行的**最右侧**（右对齐）；
-   `.hcm-legend` 也在 sub 里、同样右对齐（见下）。窄窗口里放不下时自动换行，仍是右对齐。 */
+/* 头部（第二十九轮口径③ + R1 口径②）：**一行** —— 标题在左，快照信息紧跟在标题右边（同一行），
+   `.hide-entry-sub`（图例）贴这一行的**最右侧**。窄窗口里放不下时整行折行，仍是右对齐。 */
 #hide-helper-ctx-merged-popup .hide-entry-head {
     display: flex !important; flex-direction: row !important; align-items: baseline !important;
     flex-wrap: wrap !important; gap: 4px 10px !important;
@@ -1270,10 +1269,17 @@ html.hh-theme-switching::view-transition-new(root) {
     color: var(--hh-text-primary) !important; font-size: 16px !important; font-weight: 600 !important;
     padding-right: 0 !important; flex: 0 0 auto !important;
 }
-/* sub 行：`margin-left: auto` 把它推到标题行最右（右对齐）；内部同样右对齐 + 允许折行 */
+/* 快照信息（口径②）：与标题**同一行**、紧贴它右边；`flex: 0 1 auto` 让它长了先被省略号截断，
+   不会把标题或右侧图例挤走（`min-width: 0` 是省略号生效的前提）。 */
+#hide-helper-ctx-merged-popup .hide-entry-book {
+    flex: 0 1 auto !important; min-width: 0 !important;
+    font-size: 0.78em !important; color: var(--hh-text-secondary) !important;
+    white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;
+}
+/* sub 行（图例）：`margin-left: auto` 把它推到标题行最右（右对齐）；内部同样右对齐 + 允许折行 */
 #hide-helper-ctx-merged-popup .hide-entry-sub {
     font-size: 0.78em !important; color: var(--hh-text-secondary) !important;
-    flex: 1 1 auto !important; min-width: 0 !important;
+    flex: 0 0 auto !important; min-width: 0 !important; margin-left: auto !important;
     display: flex !important; flex-wrap: wrap !important; align-items: center !important;
     justify-content: flex-end !important; text-align: right !important; gap: 4px 10px !important;
 }
