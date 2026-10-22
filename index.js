@@ -278,7 +278,7 @@ const domCache = {
 // --- 主题应用逻辑 ---
 function applyTheme(theme) {
     // 同时寻找主弹窗、条目详情子窗、聊天统计子弹窗、完整上下文查看器、更新遮罩层、通知弹窗，赋予独立的局部主题标识
-    const targets = $('#hide-helper-popup, #hide-helper-entry-popup, #hide-helper-chat-stats-popup, #hide-helper-context-viewer, #hide-helper-wi-msg-popup, #hide-helper-ctx-outline-popup, #hide-helper-ctx-merged-popup, .hide-modal-overlay, #hide-helper-theme-notification');
+    const targets = $('#hide-helper-popup, #hide-helper-entry-popup, #hide-helper-chat-stats-popup, #hide-helper-wi-msg-popup, #hide-helper-ctx-outline-popup, #hide-helper-ctx-merged-popup, .hide-modal-overlay, #hide-helper-theme-notification');
     if (theme === 'dark') {
         targets.attr('data-theme', 'dark');
         $('#hide-helper-theme-toggle').html('<i class="fa-solid fa-sun"></i> 切换为亮色模式');
@@ -1966,9 +1966,20 @@ function extractAnchors(visibleText) {
     return anchors;
 }
 
+// 条目可见文本里**第一个可用行锚点**（第二十九轮：给「上下文目录 → 完整上下文」的条目定位用）。
+// 与 `extractAnchors` / `findEntrySpans` 同一套口径 —— 也就是说：统计里"认领"了哪些字符，
+// 就用同样的一段原文去内容区里找它的起点。优先取整段（去首尾空白），太长时退回第一个非空行。
+function entryAnchorHint(visibleText) {
+    const raw = String(visibleText ?? '').trim();
+    if (!raw) return '';
+    const whole = raw;
+    if (whole.length <= 240) return whole;
+    const line = raw.split(/\r?\n/).map(l => l.trim()).find(l => l.length >= ANCHOR_MIN_LENGTH);
+    return line || whole.slice(0, 240);
+}
+
 // 认领一个字符区间；与已认领区间重叠则失败（避免条目间重复计数）
-function claimInterval(slot, start, end) {
-    for (const [s, e] of slot.claimed) {
+function claimInterval(slot, start, end) {    for (const [s, e] of slot.claimed) {
         if (start < e && end > s) return false;
     }
     slot.claimed.push([start, end]);
@@ -2798,6 +2809,13 @@ async function computeRenderedStats(messages, options = {}) {
     const entrySlotTokens = new Map(); // entryKey -> Map<slotIdx, tokens>：条目在各槽位**精确命中**的 token
     const entrySpanSlots = new Map();  // entryKey -> Set<slotIdx>
     const entryFirstPos = new Map();   // entryKey -> pos|null
+    // 第二十九轮（用户口径④"世界书条目的滚动定位还是不够准确"）：
+    //   pos 原先取**全部槽位里的最小命中偏移**，于是"同一条目在多条消息里都命中"时，
+    //   pos 总是落在最早那条消息上 → 后一条消息里的该条目在 `ensureEntryLayout` 里被判成
+    //   "槽位号对不上"直接丢弃 → 剩下能亮的那几条边界被拉得很开，滚动时高亮就"一下跳好几个"。
+    //   这里另存**逐槽位**的首个命中偏移：`entrySlotFirstPos: entryKey -> Map<slotIdx, 首个 start>`，
+    //   完整上下文的 `wiEntries[].pos` 改为"**本槽位内**的首个命中偏移"，不再跨条污染。
+    const entrySlotFirstPos = new Map();
     const slotOwnClaimed = new Map();  // slotIdx -> tokens（被世界书命中量，仅用于判定覆盖阈值）
 
     for (const entry of scanEntries) {
@@ -2817,11 +2835,16 @@ async function computeRenderedStats(messages, options = {}) {
         entrySlotTokens.set(key, perSlot);
         entrySpanSlots.set(key, new Set(perSlot.keys()));
         let pos = null;
+        const firstInSlot = new Map();   // slotIdx -> 该条目在这个槽位里最早的命中字符偏移
         for (const span of spans) {
-            const p = (span.slot.index ?? 0) * 1e6 + span.start;
+            const si = span.slot.index ?? 0;
+            const p = si * 1e6 + span.start;
             if (pos === null || p < pos) pos = p;
+            const prev = firstInSlot.get(si);
+            if (prev === undefined || span.start < prev) firstInSlot.set(si, span.start);
         }
         entryFirstPos.set(key, pos);
+        entrySlotFirstPos.set(key, firstInSlot);
     }
 
     // 条目元数据（供纯函数归因）：key / position / depth / role / 体积权重（渲染后可见文本 token，≥1）。
@@ -3073,13 +3096,27 @@ async function computeRenderedStats(messages, options = {}) {
         for (const [k, t] of per) {
             const meta = metaByKey.get(k);
             if (!meta || !(t > 0)) continue;
+            // pos 的口径（第二十九轮修正）：**本槽位内**该条目正文的首个命中字符偏移，
+            // 编码为 `槽位号 * 1e6 + 偏移`。此前取的是"全部槽位里的最小偏移"，
+            // 同一个条目在多条消息里都命中时，其他消息里的这条会因槽位号对不上而失去定位
+            // → 世界书条目的滚动联动高亮会"一下跳好几个"（用户口径④）。
+            const offInSlot = entrySlotFirstPos.get(k)?.get(i);
+            const pos = (offInSlot === undefined || offInSlot === null)
+                ? (entryFirstPos.get(k) ?? null)   // 本槽位没有精确命中（余量分摊得到的 token）→ 退回旧口径
+                : (i * 1e6 + offInSlot);
+            // 定位提示（第二十九轮）：条目可见文本里第一个行锚点（与文本匹配用的是同一套锚点）。
+            // 内容区里"条目正文从第几个字符开始"直接用它 `indexOf` 定位 —— 比单靠 pos 偏移稳：
+            // pos 来自"渲染后可见文本"的偏移，而内容区里的是**实际发送的字符**（可能被正则改写过），
+            // 两者一旦错位，旧实现会把超出的偏移钳到最后一位 ⇒ 多条条目挤在同一个纵坐标上 ⇒ 高亮乱跳。
+            const hint = entryAnchorHint(visibleTexts.get(k));
             out.push({
                 name: meta.name, book: meta.book, type: meta.type, uid: meta.uid,
                 tokens: Math.max(1, Math.round(t)),
                 // 该条目自己的"真实插入点"（与 wiDetailedStats 的 anchor 是同一份推导）：
                 // 左侧子窗按「上下文顺序」排条目、并渲染聊天位置标记行时要用它。
                 anchor: entryAnchors.get(k) || null,
-                pos: entryFirstPos.get(k) ?? null,
+                pos,
+                hint,
                 // 展示用（第二十七轮 R5）：条目行第二行「插入位置 · 顺序」（来自 entriesMeta 的原始值）
                 position: meta.positionRaw ?? null,
                 depth: meta.depthRaw ?? null,
@@ -4551,13 +4588,12 @@ function renderTokenStatsContent(model) {
     const getPct = (v) => totalTokens > 0 ? ((v / totalTokens) * 100).toFixed(1) : 0;
 
     // 渲染概览行（全部来自最终上下文，与"实际发送"一致）
-    // 渲染概览行（全部来自最终上下文，与"实际发送"一致）
-    // 「总共」框可点击：**直接**打开「完整上下文」查看器（第二十七轮 R2 用户口径：把查看器的层级提上来，
-    //   不再从「聊天」统计子窗里进去 —— 于是查看器直接挂在主弹窗下）。
+    // 「总共」框可点击：**直接**开出「上下文目录（左）+ 完整上下文（右）」这一对窗口
+    //   （第二十九轮用户口径①：原来的第一层「完整上下文」查看器内容重复，已整体删除）。
     // 「聊天」框可点击：打开聊天统计子弹窗（实际发送范围 / AI token 均值 / 生成速度 / 历史折线）。
     // 「总共」框在总量达到预算阈值（200000）时标红预警。
     const overBudget = totalTokens >= STATS_BUDGET_TOKENS;
-    const totalTitle = `点击查看完整上下文（这次实际发送的 ${totalTokens} tokens 逐条明细）`
+    const totalTitle = `点击查看完整上下文（左侧上下文目录 + 右侧实际发送的 ${totalTokens} tokens 全文）`
         + (overBudget ? `；⚠️ 总量已达 ${STATS_BUDGET_TOKENS} 的预算上限` : '');
     overviewEl.innerHTML = `
         <div class="tub-stat-box tub-stat-box-clickable${overBudget ? ' tub-stat-box-over-budget' : ''}" data-stat="total" title="${escapeHtmlText(totalTitle)}"><span class="tub-stat-label">总共</span><span class="tub-stat-value">${totalTokens}<br><small>${overBudget ? '超出预算' : '实际发送'}</small></span></div>
@@ -4565,9 +4601,9 @@ function renderTokenStatsContent(model) {
         <div class="tub-stat-box"><span class="tub-stat-label">世界书</span><span class="tub-stat-value">${wiTokens}<br><small>${getPct(wiTokens)}%</small></span></div>
         <div class="tub-stat-box"><span class="tub-stat-label">其他</span><span class="tub-stat-value">${otherTokens}<br><small>${getPct(otherTokens)}%</small></span></div>
     `;
-    // 「总共」→ 完整上下文查看器（点击开/关；层级 = 直接挂主弹窗）
+    // 「总共」→ 上下文目录 + 完整上下文（点击开/关；层级 = 直接挂主弹窗）
     const totalStatBox = overviewEl.querySelector('.tub-stat-box[data-stat="total"]');
-    if (totalStatBox) totalStatBox.onclick = (ev) => { ev.stopPropagation(); toggleContextViewerFromStats(model); };
+    if (totalStatBox) totalStatBox.onclick = (ev) => { ev.stopPropagation(); toggleContextOutlineFromStats(model); };
     // 「聊天」→ 聊天统计子弹窗（点击开/关；与条目详情子窗同款交互，但形态为贴框小浮层）
     const chatStatBox = overviewEl.querySelector('.tub-stat-box[data-stat="chat"]');
     if (chatStatBox) chatStatBox.onclick = (ev) => { ev.stopPropagation(); toggleChatStatsPopup(model, chatStatBox); };
@@ -4992,9 +5028,9 @@ function initHiddenScrollbar(bodyEl) {
 //   · 父窗**不是**主弹窗时 → **主弹窗隐藏**；子窗与父窗**同宽同顶**（子窗更高时只上移必要的量）。
 //   · 首选那侧放不下 → 改用另一侧；两侧都放不下（窄屏）→ 两窗居中叠放（当前窗压在上层）。
 //   · 位置全部由 layoutChildPair() 一处决定（各 open* 只负责渲染内容 + 亮出自己的 DOM）。
-//   · **唯一的三窗例外**（第二十七轮用户口径）：从「条目来源」里点条目开「条目详情」时，`pairExtraId` 记下
-//     "该继续留在屏幕上的那一层"（= 条目来源的父窗，通常是完整上下文查看器）→ 屏幕上恒为
-//     「条目详情(左) | 条目来源(中) | 完整上下文查看器(右)」三窗；本窗一律落在 **extra 的对面**（避开重叠），
+//   · **唯一的三窗例外**（第二十七轮用户口径，第二十九轮入口改为目录）：从「条目来源」里点条目开「条目详情」时，
+//     `pairExtraId` 记下"该继续留在屏幕上的那一层"（= 条目来源的父窗，现在是上下文目录）→ 屏幕上恒为
+//     「条目详情(左) | 条目来源(中) | 上下文目录(右)」三窗；本窗一律落在 **extra 的对面**（避开重叠），
 //     而不是按"父窗落在视口哪半边"决定。其余任何打开子窗的步骤**仍是两个窗口**。
 //  ⚠️ 历史（别照抄）：第二十轮"三窗一排"（'center'/'above'/'right-edge'，已删）；第二十一轮"主窗恒在左 + 单槽位"；
 //     第二十二轮把「目录」「条目来源」收进查看器内部（A 方案，已回退）；第二十三轮"父左子右两槽 + 子窗「← 返回」"（返回按钮第二十四轮删除）。
@@ -5008,12 +5044,13 @@ let pairMainSlot = null;         // 主窗"自己的槽位" {left, top, width, h
 let pairMainPrevDisplay = undefined;  // 主窗被隐藏前的 inline display（还原用；undefined = 当前没被我们隐藏）
 let pairExtraId = null;          // 额外保留在屏幕上的那一层（第三窗；只有"条目来源 → 条目详情"这一步非空）
 const childStack = [];           // 层级链：栈顶 = 当前窗的**直接父窗**
-const CTX_OUTLINE_ID = 'hide-helper-ctx-outline-popup';   // 上下文目录（= 目录页，第二十轮新增）
-const CTX_MERGED_ID = 'hide-helper-ctx-merged-popup';     // 完整上下文·合并内容（= 内容区，第二十七轮新增）
+const CTX_OUTLINE_ID = 'hide-helper-ctx-outline-popup';   // 上下文目录（= 目录页，第二十轮新增；第二十九轮起是顶层入口）
+const CTX_MERGED_ID = 'hide-helper-ctx-merged-popup';     // 完整上下文（= 内容区，第二十七轮新增）
+// 第二十九轮：`hide-helper-context-viewer`（第一层「完整上下文」查看器）**整体删除** ——
+//   用户口径："第一层的完整上下文弹窗内容太过重复"，点「总共」直接显示「上下文目录 + 完整上下文」。
 const CHILD_POPUP_IDS = [
     'hide-helper-entry-popup',
     'hide-helper-chat-stats-popup',
-    'hide-helper-context-viewer',
     'hide-helper-wi-msg-popup',
     'hide-helper-ctx-outline-popup',
     'hide-helper-ctx-merged-popup',
@@ -5024,7 +5061,6 @@ function childPopupTable() {
     return [
         ['hide-helper-entry-popup', 0],
         ['hide-helper-chat-stats-popup', 0],
-        ['hide-helper-context-viewer', 0],
         ['hide-helper-wi-msg-popup', WI_MSG_POPUP_MIN_HEIGHT],
         ['hide-helper-ctx-outline-popup', CTX_OUTLINE_MIN_HEIGHT],
         ['hide-helper-ctx-merged-popup', 0],
@@ -5124,6 +5160,9 @@ function closeChildPopupAt(id) {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
     layoutChildPair();
+    // 第二十九轮：关掉的若是"成对窗口的临时子窗"（如「条目来源」），退回到目录后要把右侧完整上下文放回来。
+    // ⚠️ 放在 layoutChildPair 之后：先按挂起态摆好「目录 | 子窗 → 目录」，再由 resume 补回内容窗。
+    if (ctxMergeMode && ctxMergeSuspended && currentChildId() === CTX_OUTLINE_ID) resumeOutlineMergeAfterChild();
 }
 
 // 关闭**当前窗**（= closeChildPopupAt(当前窗)）：语义就是"退一层"
@@ -5174,10 +5213,17 @@ function layoutChildPair() {
     const mainEl = document.getElementById('hide-helper-popup');
     clearPairStacking(mainEl);
     const curId = currentChildId();
-    // 成对模式（「目录 + 合并内容」，查看器收起）：落点整体交给 layoutOutlineMergePair 一处决定
+    // 成对模式（「目录 + 完整上下文」）：落点整体交给 layoutOutlineMergePair 一处决定
     if (ctxMergeMode) {
-        if (curId === CTX_OUTLINE_ID) {
-            // 成对模式：屏幕上**只留「目录 + 合并内容」** —— 其它子窗（查看器 / 条目来源 / 条目详情…）一律收起。
+        if (ctxMergeSuspended) {
+            // 挂起中（从目录里打开了「条目来源」等子窗）：**模式保持不变**，只是右侧完整上下文暂时收起，
+            // 让下面普通的两窗逻辑摆「目录 | 条目来源」。关掉子窗后 resumeOutlineMergeAfterChild 恢复成对窗口。
+            // ⚠️ 这一支必须排在最前面：挂起时"当前窗"本来就不是目录，不能据此判定模式结束（实测踩过：
+            //    那样会把 ctxMergeMode 清掉，关闭条目来源后右侧完整上下文再也回不来）。
+            const mrgEl = document.getElementById(CTX_MERGED_ID);
+            if (mrgEl) mrgEl.style.display = 'none';
+        } else if (curId === CTX_OUTLINE_ID) {
+            // 成对模式：屏幕上**只留「目录 + 完整上下文」** —— 其它子窗（条目来源 / 条目详情…）一律收起。
             // ⚠️ 这一条不能省：从「条目来源」的"跳到正文"图标进成对模式时，可能同时还开着别的子窗，
             //    少了它屏幕上会堆出 3~4 个重叠窗口（真实 Chromium 实测）。
             for (const id of CHILD_POPUP_IDS) {
@@ -5187,9 +5233,11 @@ function layoutChildPair() {
             }
             layoutOutlineMergePair();
             return;
+        } else {
+            // 目录已经不在了（被别的路径关掉）→ 模式结束
+            ctxMergeMode = false;
+            ctxMergeSuspended = false;
         }
-        // 目录已经不在了（被别的路径关掉）→ 模式结束；合并内容窗由下面的可见集合收起来
-        ctxMergeMode = false;
     }
     if (!curId) {                                  // 没有子窗：只有主窗（位置不动）
         for (const id of CHILD_POPUP_IDS) {
@@ -5211,7 +5259,10 @@ function layoutChildPair() {
         && document.getElementById(pairExtraId)) ? pairExtraId : null;
     for (const id of CHILD_POPUP_IDS) {
         const el = document.getElementById(id);
-        if (el) el.style.display = (id === curId || id === pid || id === extraId) ? 'flex' : 'none';
+        if (!el) continue;
+        // 成对模式挂起期间（「目录 | 条目来源」两窗）不得把完整上下文窗亮回来
+        if (ctxMergeMode && ctxMergeSuspended && id === CTX_MERGED_ID) { el.style.display = 'none'; continue; }
+        el.style.display = (id === curId || id === pid || id === extraId) ? 'flex' : 'none';
     }
     setMainHiddenForPair(!!pid);
 
@@ -5717,7 +5768,7 @@ async function openChatStatsPopup(model, anchorEl) {
     `;
     if (ctxHasDump) {
         const btn = document.getElementById('hcs-open-context');
-        if (btn) btn.onclick = () => openContextViewer(model);
+        if (btn) btn.onclick = () => { closeChatStatsPopup(); openContextOutlinePopup(model); };
     } else {
         const mkBtn = document.getElementById('hcs-make-snapshot');
         if (mkBtn) mkBtn.onclick = () => refreshContextSnapshot({ openViewer: true });
@@ -5755,12 +5806,12 @@ function openLatestContextViewer() {
         notify('info', '当前聊天还没有快照：点「立即生成快照（模拟发送）」，或在统计页点「模拟发送」。');
         return false;
     }
-    openContextViewer({ isSim: dump.anchorId === SIM_ANCHOR_ID, index: dump.anchorId, genType: dump.genType });
+    openContextOutlinePopup({ isSim: dump.anchorId === SIM_ANCHOR_ID, index: dump.anchorId, genType: dump.genType });
     notify('success', `已打开最近的快照（${dump.messages?.length || 0} 条消息 · ${dump.total || 0} tokens）`);
     return true;
 }
 
-// 静默跑一次模拟发送（跳过输入弹窗）→ 等快照落库 → 按需直接打开查看器
+// 静默跑一次模拟发送（跳过输入弹窗）→ 等快照落库 → 按需直接打开「目录 + 完整上下文」
 async function refreshContextSnapshot({ openViewer = true, waitMs = 8000 } = {}) {
     const context = getContext?.();
     if (!context?.chatId) { notify('warning', '当前没有打开的聊天，无法生成快照。'); return null; }
@@ -5774,7 +5825,7 @@ async function refreshContextSnapshot({ openViewer = true, waitMs = 8000 } = {})
     const dump = contextDumpStore.get(key) || null;
     if (!dump) { notify('warning', '快照没有生成（详见控制台日志）。'); return null; }
     notify('success', `快照已更新：${dump.messages.length} 条消息 · ${dump.total} tokens`);
-    if (openViewer) openContextViewer({ isSim: true, index: SIM_ANCHOR_ID, genType: dump.genType });
+    if (openViewer) openContextOutlinePopup({ isSim: true, index: SIM_ANCHOR_ID, genType: dump.genType });
     return dump;
 }
 
@@ -5783,15 +5834,24 @@ function makeDemoContextDump() {
     const chatId = getContext?.()?.chatId || 'demo';
     const long = Array.from({ length: 40 }, (_, i) => `第 ${i + 1} 行：用于测试"正文折叠 + 内部滚动"的长文本，含 ELDORIA 关键词。`).join('\n');
     const mk = (i, role, tokens, identifier, kind, text, wiEntries = null) => ({ i, role, tokens, identifier, kind, text, wiEntries });
+    // ⚠️ 世界书条目的定位字段（第二十九轮口径④）：`pos` = 槽位序号*1e6 + 条目正文**在本槽位内**的字符偏移；
+    //    `hint` = 条目正文的第一个行锚点（内容区按它在正文里 indexOf 出起点，比单靠 pos 稳）。
+    //    演示数据里每条占一行 ⇒ 偏移 0 / 16 / 32。
+    const wiText1 = '【世界书·前置】常驻设定：ELDORIA 是一座浮空城。\n【世界书·前置】补充设定：城里有三座钟塔。\n【世界书·前置】细节设定：钟塔只在黄昏鸣响。';
+    const wiText2 = '【世界书·后置】补充设定：主角随身带着一枚旧铜钥匙。\n【世界书·后置】补充设定：钥匙上刻着看不懂的字。';
     const messages = [
         mk(0, 'system', 260, 'main', 'other', 'You are a helpful assistant.\n{{char}} 住在 ELDORIA。'),
-        // ⚠️ pos = 槽位序号*1e6 + 条目正文在槽位正文里的字符偏移（与真实统计同口径，第二十八轮的
-        //     "条目行滚动联动"靠它定位）；演示数据里两条条目各占一行 ⇒ 偏移 0 与 15。
-        mk(1, 'system', 900, 'worldInfoBefore', 'wi-before', '【世界书·前置】常驻设定……\n【世界书·前置】补充设定……', [
-            { name: '前置常驻条目', book: 'Eldoria', type: 'constant', uid: '90001', tokens: 600, anchor: null, pos: 1000000 },
-            { name: '前置动态条目', book: 'EldoriaNSFW', type: 'dynamic', uid: '90002', tokens: 300, anchor: null, pos: 1000015 },
+        mk(1, 'system', 900, 'worldInfoBefore', 'wi-before', wiText1, [
+            { name: '前置常驻条目', book: 'Eldoria', type: 'constant', uid: '90001', tokens: 600, anchor: null, pos: 1000000, hint: '【世界书·前置】常驻设定：ELDORIA 是一座浮空城。' },
+            { name: '前置动态条目', book: 'EldoriaNSFW', type: 'dynamic', uid: '90002', tokens: 300, anchor: null, pos: 1000016, hint: '【世界书·前置】补充设定：城里有三座钟塔。' },
+            { name: '前置细节条目', book: 'Eldoria', type: 'dynamic', uid: '90003', tokens: 120, anchor: null, pos: 1000032, hint: '【世界书·前置】细节设定：钟塔只在黄昏鸣响。' },
         ]),
-        mk(2, 'system', 140, 'worldInfoAfter', 'wi-after', '【世界书·后置】补充设定……'),
+        // 同一个条目（90001）在第二条世界书消息里**也命中**了：第二十九轮之前，它的 pos 会被第一条消息的偏移"抢走"，
+        // 于是这条消息里的条目全部失去定位（滚动联动"一下跳好几个"）。
+        mk(2, 'system', 140, 'worldInfoAfter', 'wi-after', wiText2, [
+            { name: '后置常驻条目', book: 'Eldoria', type: 'constant', uid: '90001', tokens: 90, anchor: null, pos: 2000000, hint: '【世界书·后置】补充设定：主角随身带着一枚旧铜钥匙。' },
+            { name: '后置动态条目', book: 'Eldoria', type: 'dynamic', uid: '90004', tokens: 50, anchor: null, pos: 2000022, hint: '【世界书·后置】补充设定：钥匙上刻着看不懂的字。' },
+        ]),
         mk(3, 'system', 60, 'authorsNote', 'other', 'AN：保持 ELDORIA 世界观一致。'),
         mk(4, 'user', 22, 'chatHistory-2', 'chat', '我们去 ELDORIA 的集市看看。'),
         mk(5, 'assistant', 180, 'chatHistory-1', 'chat', long),
@@ -5799,7 +5859,7 @@ function makeDemoContextDump() {
     ];
     const dump = { genType: 'normal', total: messages.reduce((s, m) => s + m.tokens, 0), source: 'simulate', messages };
     saveContextDump(chatId, SIM_ANCHOR_ID, 'simulate', dump);
-    openContextViewer({ isSim: true, index: SIM_ANCHOR_ID, genType: 'normal' });
+    openContextOutlinePopup({ isSim: true, index: SIM_ANCHOR_ID, genType: 'normal' });
     notify('success', `已塞入演示快照（${messages.length} 条消息，不跑管线）`);
     return dump;
 }
@@ -5821,34 +5881,22 @@ if (typeof window !== 'undefined') {
         latest: latestContextDumpFor,
     };
 }
-// ==================== 聊天统计 · 完整上下文查看器（仅内存） ====================
+// ==================== 聊天统计 · 上下文快照（仅内存） ====================
 // 数据来源：`contextDumpStore`（每次统计时写入的"实际发送的每条消息"快照），刷新/切聊天即清空。
-// 形态：主弹窗右侧的独立窗口（与条目详情子窗同款并排定位逻辑），逐条列出实际发送的消息。
-// 本轮（CHANGELOG §2.30）在该窗上新增四件事：
-//   ① 顶部工具栏：**整窗检索**（命中高亮 + 计数 + 上/下跳转）与两个维度筛选
-//      （来源：聊天 / 世界书 / 其他；角色：system / user / assistant）
-//   ② 每条消息的正文收进 `.hc-msg-body` 内部滚动区（滚动条与三个子窗同款：默认隐藏、滚动/悬停/拖拽三档显色）
-//   ③ `hc-msg-tokens` 里两个图标：世界书消息的「条目来源」子窗（放大镜左侧）+ 任意消息的「本条内检索」放大镜
-//   ④ 工具栏 `hc-filters` 最右的图标 → 一次开出「上下文目录（目录页）」+「完整上下文·合并内容（内容区）」两个同级窗、
-//      查看器收起（第二十七轮用户口径；见下文的成对模式）
-//   ⑤ 目录里点消息头 → 本查看器滚动到该条；目录里的世界书条目行可点开条目详情子窗
-// 正文默认折叠为摘要（长消息不撑爆窗口），点击行展开/收起。
-let contextViewerKey = null;      // 当前展示的 dump 键（刷新时沿用）
-let ctxModel = null;              // 打开查看器时的 model（左侧子窗按"上下文顺序"排条目要用它推序号）
+// 第二十九轮（用户口径①）：原来的**第一层「完整上下文」查看器**整体删除（"内容太过重复"），
+//   它的「筛选 / 检索 / 键盘导航」平移到「上下文目录」窗头部，「条目来源」子窗改由目录行打开；
+//   快照的载入逻辑（本段）仍由成对窗口复用，故保留 `ctxDump` / `ctxModel` / `ctxMsgByIndex` 等状态。
+let contextViewerKey = null;      // 当前快照键（沿用旧名：锚点视图 / 条目来源都按它判"换没换内容"）
+let ctxModel = null;              // 打开时的 model（条目按"上下文顺序"排序要用它推序号）
 let ctxDump = null;               // 当前快照
 let ctxMsgByIndex = new Map();    // 序号 → 消息记录
-let ctxSearchTerm = '';           // 整窗检索词
+let ctxSearchTerm = '';           // 目录检索词（第二十九轮：从查看器平移到目录）
 let ctxSourceFilter = 'all';      // 'all' | 'chat' | 'wi' | 'other'
 let ctxRoleFilter = 'all';        // 'all' | 'system' | 'user' | 'assistant'
-let ctxSearchRowOpen = false;     // 检索行是否展开（第二十七轮 R2：默认收起，点放大镜切换）
 let ctxHotkeysBound = false;      // 键盘导航的文档级监听只绑一次
-let ctxExpanded = new Set();      // 用户手动展开全文的消息序号
-let ctxMsgSearch = null;          // 单条内检索：{ i, term }
-let ctxVisibleCount = 0;          // 当前筛选后可见的消息条数
-let ctxHitCount = 0;              // 整窗命中总数
+let ctxHitCount = 0;              // 目录检索的命中总数
 let ctxHitCursor = -1;            // 当前命中序号（0 起；-1 = 尚未跳转）
-let ctxMsgHitCount = 0;           // 单条内检索的命中总数
-let ctxMsgHitCursor = -1;
+let ctxVisibleCount = 0;          // 目录筛选后可见的消息条数（"显示 x / y 条"）
 
 // 内联 SVG 图标（不依赖字体图标是否加载）：放大镜 / 条目来源 / 上一个 / 下一个
 const HC_ICON_SEARCH = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>';
@@ -5864,8 +5912,6 @@ const CONTEXT_KIND_LABELS = {
     'wi-block': '世界书·混入', 'wi-merged': '世界书·合并', 'other': '其他',
 };
 
-// 摘要截断长度（与原实现一致：正文超过它就只显示摘要 + "…"）
-const CTX_PREVIEW_CHARS = 240;
 // 目录里聊天子行的正文预览长度（第二十八轮用户口径：删掉来源列后，中间改显"正文前 N 个字符"）。
 // 只是 DOM 里的字符上限 —— 视觉截断由 CSS 的省略号负责（行宽远小于 N），全文进 title 悬停可见。
 const OUTLINE_PREVIEW_CHARS = 80;
@@ -5915,27 +5961,6 @@ function highlightTextHtml(text, term, { attr = '', base = 0, cls = 'hc-hit' } =
     });
     html += escapeHtmlText(raw.slice(cursor));
     return { html, count: hits.length };
-}
-
-// 摘要文本（与原实现同一截断口径）
-function ctxPreviewText(text) {
-    return String(text ?? '').slice(0, CTX_PREVIEW_CHARS).replace(/\s+/g, ' ').trim();
-}
-
-// 摘要/全文的容器内容（**行首次渲染与后续刷新共用同一套**：首次就带上初始摘要，
-// 刷新时换上有命中编号的高亮版本）。返回 { empty, previewHtml, fullHtml, previewCount, fullCount }。
-function ctxMsgTextHtml(m, { term = '', attr = '', base = 0 } = {}) {
-    const full = String(m?.text ?? '');
-    if (!full.trim()) return { empty: true };
-    const preview = highlightTextHtml(ctxPreviewText(full), term, { attr, base });
-    const whole = highlightTextHtml(full, term, { attr, base });
-    return {
-        empty: false,
-        previewHtml: preview.html + (full.length > CTX_PREVIEW_CHARS ? '…' : ''),
-        fullHtml: whole.html,
-        previewCount: preview.count,
-        fullCount: whole.count,
-    };
 }
 
 // 「清空检索」图标：橡皮擦（比 `&times;` 直观 —— 用户口径）
@@ -6009,175 +6034,14 @@ function toggleCtxFilterMenu(triggerEl, cfg) {
 const CTX_SOURCE_OPTIONS = [['all', '全部'], ['chat', '聊天'], ['wi', '世界书'], ['other', '其他']];
 const CTX_ROLE_OPTIONS = [['all', '全部'], ['system', 'system'], ['user', 'user'], ['assistant', 'assistant']];
 
-function ensureContextViewer() {
-    let el = document.getElementById('hide-helper-context-viewer');
-    if (el) return el;
-    $('body').append(`
-        <div id="hide-helper-context-viewer" class="hide-helper-popup hide-helper-context-viewer" style="display: none;">
-            <button id="hide-helper-context-viewer-close" class="hide-helper-popup-close-icon" title="关闭">&times;</button>
-            <div class="hide-entry-head">
-                <div class="hide-entry-name" id="hide-context-title">完整上下文</div>
-                <div class="hide-entry-sub" id="hide-context-sub"></div>
-            </div>
-            <div class="hc-toolbar" id="hc-toolbar">
-                <div class="hc-filters">
-                    <button type="button" class="hc-menu-btn" id="hc-filter-source" title="按来源过滤">
-                        <span class="hc-menu-btn-label">来源</span><span class="hc-menu-btn-value" id="hc-filter-source-text">全部</span>
-                    </button>
-                    <button type="button" class="hc-menu-btn" id="hc-filter-role" title="按角色过滤">
-                        <span class="hc-menu-btn-label">角色</span><span class="hc-menu-btn-value" id="hc-filter-role-text">全部</span>
-                    </button>
-                    <div class="hc-count" id="hc-count"></div>
-                    <!-- 放大镜（第二十七轮 R2）：点它 → 下方展开检索行（再点收起）。
-                         就放在「目录」图标左侧；原来的常驻检索行已按用户口径去掉。 -->
-                    <button type="button" class="hc-icon-btn hc-search-toggle" id="hc-search-toggle" title="显示/隐藏检索框">${HC_ICON_SEARCH}</button>
-                    <button type="button" class="hc-icon-btn hc-wi-expand" id="hc-wi-expand-all" title="显示/隐藏上下文目录（目录在左 + 合并内容在右）">${HC_ICON_WI}</button>
-                </div>
-                <div class="hc-search hc-search-row" id="hc-search-row" style="display: none;">
-                    <input type="text" id="hc-search-input" class="hc-search-input" placeholder="检索上下文…">
-                    <span class="hc-search-count" id="hc-search-count"></span>
-                    <button type="button" class="hc-icon-btn" id="hc-hit-prev" title="上一个命中（Shift+Enter）">${HC_ICON_UP}</button>
-                    <button type="button" class="hc-icon-btn" id="hc-hit-next" title="下一个命中（Enter）">${HC_ICON_DOWN}</button>
-                    <button type="button" class="hc-icon-btn" id="hc-search-clear" title="清空检索">${HC_ICON_ERASER}</button>
-                </div>
-            </div>
-            <div class="hide-entry-body hc-list" id="hide-context-body"></div>
-        </div>
-    `);
-    el = document.getElementById('hide-helper-context-viewer');
-    $('#hide-helper-context-viewer-close').on('click', () => closeContextViewer());
-    // 「目录」图标：开/关「上下文目录 + 合并内容」成对窗口（再点一次收起）
-    el.querySelector('#hc-wi-expand-all')?.addEventListener('click', () => toggleContextOutlinePopup());
-    // 滚动条与条目详情子窗同款：默认隐藏，滚动/悬停/拖拽时才显色（见 initHiddenScrollbar 与 CSS 的 .hh-sb-*）
-    initHiddenScrollbar(el.querySelector('#hide-context-body'));
-
-    // 检索行：默认收起；点放大镜展开（并聚焦），再点收起（收起时清空检索词，与旧行为一致）
-    const searchRow = el.querySelector('#hc-search-row');
-    const searchToggle = el.querySelector('#hc-search-toggle');
-    const searchInput = el.querySelector('#hc-search-input');
-    const applySearchRowState = (open) => {
-        if (searchRow) searchRow.style.display = open ? 'flex' : 'none';
-        searchToggle?.classList.toggle('active', open);
-        if (open) {
-            searchInput?.focus();
-        } else if (ctxSearchTerm.trim()) {
-            if (searchInput) searchInput.value = '';
-            ctxSearchTerm = '';
-            ctxHitCursor = -1;
-            refreshMsgTexts();
-            applyHitCursor();
-        }
-    };
-    ctxSearchRowOpen = !!searchRow && searchRow.style.display !== 'none';
-    applySearchRowState(ctxSearchRowOpen);
-    searchToggle?.addEventListener('click', () => {
-        ctxSearchRowOpen = !ctxSearchRowOpen;
-        applySearchRowState(ctxSearchRowOpen);
-    });
-
-    // 整窗检索：输入即刷新正文容器（列表 DOM 不动 → 输入框不会丢焦点、滚动位置不跳）
-    searchInput?.addEventListener('input', () => {
-        ctxSearchTerm = searchInput.value;
-        ctxHitCursor = -1;
-        refreshMsgTexts();
-        applyHitCursor();
-    });
-    searchInput?.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') {
-            ev.preventDefault();
-            jumpCtxHit(ev.shiftKey ? -1 : 1);
-        } else if (ev.key === 'Escape') {
-            ev.preventDefault();
-            ev.stopPropagation();     // 别让 Esc 冒到文档上把整个窗口关掉（这是"退出输入"）
-            searchInput.value = '';
-            ctxSearchTerm = '';
-            ctxHitCursor = -1;
-            refreshMsgTexts();
-            applyHitCursor();
-        }
-    });
-    el.querySelector('#hc-hit-prev')?.addEventListener('click', () => jumpCtxHit(-1));
-    el.querySelector('#hc-hit-next')?.addEventListener('click', () => jumpCtxHit(1));
-    el.querySelector('#hc-search-clear')?.addEventListener('click', () => {
-        if (searchInput) {
-            searchInput.value = '';
-            searchInput.focus();
-        }
-        ctxSearchTerm = '';
-        ctxHitCursor = -1;
-        refreshMsgTexts();
-        applyHitCursor();
-    });
-    // 两个筛选维度：各自一个下拉菜单（第二十七轮 R2：从"一排小按钮"改成菜单按钮）
-    el.querySelector('#hc-filter-source')?.addEventListener('click', (ev) => {
-        const trigger = ev.currentTarget;
-        toggleCtxFilterMenu(trigger, {
-            options: CTX_SOURCE_OPTIONS, current: ctxSourceFilter,
-            onPick: (value) => { ctxSourceFilter = value; ctxHitCursor = -1; syncCtxFilterButtons(); renderContextList(); },
-        });
-    });
-    el.querySelector('#hc-filter-role')?.addEventListener('click', (ev) => {
-        const trigger = ev.currentTarget;
-        toggleCtxFilterMenu(trigger, {
-            options: CTX_ROLE_OPTIONS, current: ctxRoleFilter,
-            onPick: (value) => { ctxRoleFilter = value; ctxHitCursor = -1; syncCtxFilterButtons(); renderContextList(); },
-        });
-    });
-    syncCtxFilterButtons();
-    // 键盘导航（↑/↓、J/K、Home/End）：文档级只绑一次（第二十七轮 R2 建议②）
-    if (!ctxHotkeysBound && typeof document.addEventListener === 'function') {
-        ctxHotkeysBound = true;
-        document.addEventListener('keydown', handleContextHotkeys);
-    }
-    const theme = extension_settings[extensionName]?.theme || 'light';
-    if (theme === 'dark') el.setAttribute('data-theme', 'dark');
-    return el;
-}
-
-// 筛选菜单按钮的文案 + 选中态（两个维度各自一个；非"全部"时按钮高亮）
-function syncCtxFilterButtons() {
-    const el = document.getElementById('hide-helper-context-viewer');
-    if (!el) return;
-    for (const [btnId, textId, value, options] of [
-        ['hc-filter-source', 'hc-filter-source-text', ctxSourceFilter, CTX_SOURCE_OPTIONS],
-        ['hc-filter-role', 'hc-filter-role-text', ctxRoleFilter, CTX_ROLE_OPTIONS],
-    ]) {
-        const btn = el.querySelector(`#${btnId}`);
-        const textEl = el.querySelector(`#${textId}`);
-        if (textEl) textEl.textContent = (options.find(([v]) => v === value) || options[0])[1];
-        btn?.classList.toggle('active', value !== 'all');
-    }
-}
-
-function closeContextViewer() {
-    // 关查看器时一并收起「条目来源」/「目录」/「合并内容」子窗（它们渲染的都是本次查看的内容）——
-    // ⚠️ 这里**直接隐藏 + 清状态**，不能调它们各自的 close*：那会各"退一层"，把查看器的父窗也带下去。
-    closeCtxFilterMenu();            // 可能开着的「来源/角色」菜单也要收掉（它挂在 body 上，不随窗口隐藏）
-    exitContextOutlineMergeMode();   // 成对模式（目录 + 合并内容）先退出，状态一并清掉
-    for (const id of ['hide-helper-wi-msg-popup', CTX_OUTLINE_ID, CTX_MERGED_ID]) {
-        const c = document.getElementById(id);
-        if (c) c.style.display = 'none';
-    }
-    wiMsgPopupIndex = null;
-    wiMsgPopupMsg = null;
-    ctxOutlineActiveIndex = null;
-    closeChildPopupAt('hide-helper-context-viewer');   // × ：只退一层（回到打开它的那个窗口）
-}
-
-// 「总共」统计框点击：开/关「完整上下文」查看器。
-// 层级（第二十七轮 R2 用户口径）：**不再嵌进「聊天」统计子窗** —— `openContextViewer()` 开头本就会
-
-// ── 键盘导航（第二十七轮 R2 建议②）────────────────────────────────────────────
-// ↑/↓ 或 J/K：在消息之间跳；Home/End：跳到首/末条。
-//   · 成对模式（目录 + 合并内容）开着 → 在**内容区**里跳（目录跟着走：jumpContextOutlineToMessage 会同步高亮）
-//   · 否则（查看器是当前窗）→ 在查看器列表里逐条滚
-// ⚠️ 只在自己窗口是"当前窗"时生效；输入框 / 文本域里一律不拦（否则会吃掉正常输入）。
-function topVisibleMessageIndex(mergeOn) {
-    const bodyEl = document.getElementById(mergeOn ? 'hcm-body' : 'hide-context-body');
+// ── 键盘导航（第二十九轮：查看器删除后保留在成对窗口上）──────────────────────────────
+// ↑/↓ 或 J/K：在右侧内容区里逐条跳（左侧目录跟着高亮）；Home/End：首条 / 末条。
+// ⚠️ 只在成对窗口开着、且目录窗是当前窗时生效；输入框 / 文本域里一律不拦（否则会吃掉正常输入）。
+function topVisibleMessageIndex() {
+    const bodyEl = document.getElementById('hcm-body');
     if (!bodyEl) return null;
     const top = bodyEl.getBoundingClientRect().top;
-    const sel = mergeOn ? '.hcm-chunk' : '.hc-msg';
-    for (const el of bodyEl.querySelectorAll(sel)) {
+    for (const el of bodyEl.querySelectorAll('.hcm-chunk')) {
         if (el.getBoundingClientRect().bottom - top > 4) return Number(el.getAttribute('data-i'));   // 第一条还看得见的
     }
     return null;
@@ -6187,8 +6051,8 @@ function handleContextHotkeys(ev) {
     if (ev.altKey || ev.ctrlKey || ev.metaKey || ev.defaultPrevented) return;
     const t = ev.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    const mergeOn = ctxMergeMode;
-    if (!mergeOn && currentChildId() !== 'hide-helper-context-viewer') return;
+    if (!ctxMergeMode || ctxMergeSuspended) return;
+    if (currentChildId() !== CTX_OUTLINE_ID) return;
     const key = ev.key;
     let delta = 0, edge = null;
     if (key === 'ArrowDown' || key === 'j' || key === 'J') delta = 1;
@@ -6196,13 +6060,13 @@ function handleContextHotkeys(ev) {
     else if (key === 'Home') edge = 0;
     else if (key === 'End') edge = 1;
     else return;
-    // 导航范围：成对模式 = 全部消息（内容区本来就没筛选）；否则 = 当前筛选后可见的那些（别把筛选吞掉）
+    // 导航范围 = 目录当前可见的那些消息（筛选生效时只在筛选结果里走，别把筛选吞掉）
     const ids = (ctxDump?.messages || [])
-        .filter(m => mergeOn || ctxMessageVisible(m, { source: ctxSourceFilter, role: ctxRoleFilter }))
+        .filter(m => ctxMessageVisible(m, { source: ctxSourceFilter, role: ctxRoleFilter }))
         .map(m => m.i);
     if (!ids.length) return;
     ev.preventDefault();
-    const cur = ids.includes(ctxOutlineActiveIndex) ? ctxOutlineActiveIndex : topVisibleMessageIndex(mergeOn);
+    const cur = ids.includes(ctxOutlineActiveIndex) ? ctxOutlineActiveIndex : topVisibleMessageIndex();
     let next;
     if (edge !== null) {
         next = ids[edge === 0 ? 0 : ids.length - 1];
@@ -6211,168 +6075,22 @@ function handleContextHotkeys(ev) {
         const from = (at < 0) ? (delta > 0 ? -1 : ids.length) : at;
         next = ids[Math.max(0, Math.min(ids.length - 1, from + delta))];
     }
-    if (mergeOn) jumpContextOutlineToMessage(next);
-    else scrollContextViewerToMessage(next);
-}
-// `closeChildStack()` 重置整轮层级，故查看器直接挂在主弹窗下（关掉它回到主弹窗）。
-function toggleContextViewerFromStats(model) {
-    const el = document.getElementById('hide-helper-context-viewer');
-    if (el && el.style.display !== 'none') { closeContextViewer(); return; }
-    openContextViewer(model);
+    jumpContextOutlineToMessage(next);
 }
 
-// 单条消息行（序号 / 角色 / 来源槽位 / tokens + 两个图标 + 可折叠正文 + 本条检索行）
-function ctxMessageRowHtml(m) {
-    const kindLabel = CONTEXT_KIND_LABELS[m.kind] || m.kind || '';
-    const idLabel = m.identifier ? ` · ${escapeHtmlText(m.identifier)}` : '';
-    const text = String(m.text ?? '');
-    const isEmpty = !text.trim();
-    // 首次渲染就带上初始摘要（与 refreshMsgTexts 共用 ctxMsgTextHtml）：不依赖后续刷新即"有内容"
-    const msgText = ctxMsgTextHtml(m);
-    // 世界书来源的消息：在放大镜**左侧**多一个「条目来源」展开图标（点它开「条目来源」子窗）
-    const wiBtn = isWiKind(m.kind)
-        ? `<button type="button" class="hc-icon-btn hc-wi-expand" title="查看这条世界书消息的条目来源">${HC_ICON_WI}</button>`
-        : '';
-    return `<div class="hc-msg" data-i="${m.i}">
-            <div class="hc-msg-head">
-                <span class="hc-msg-idx">#${m.i}</span>
-                <span class="hc-msg-role hc-msg-role-${m.role === 'assistant' ? 'ai' : (m.role === 'user' ? 'user' : 'sys')}">${escapeHtmlText(m.role)}</span>
-                <span class="hc-msg-kind">${escapeHtmlText(kindLabel)}${idLabel}</span>
-                <span class="hc-msg-tokens">${m.tokens} t${wiBtn}<button type="button" class="hc-icon-btn hc-msg-search-btn" title="在这条消息内检索">${HC_ICON_SEARCH}</button></span>
-            </div>
-            <div class="hc-msg-search" data-i="${m.i}" style="display:none;">
-                <span class="hc-search-icon">${HC_ICON_SEARCH}</span>
-                <input type="text" class="hc-msg-search-input" placeholder="在这条消息内检索…">
-                <span class="hc-msg-search-count"></span>
-                <button type="button" class="hc-icon-btn" data-nav="prev" title="上一个（Shift+Enter）">${HC_ICON_UP}</button>
-                <button type="button" class="hc-icon-btn" data-nav="next" title="下一个（Enter）">${HC_ICON_DOWN}</button>
-                <button type="button" class="hc-icon-btn" data-nav="close" title="关闭本条检索">&times;</button>
-            </div>
-            <div class="hc-msg-body">${isEmpty
-                ? '<div class="hc-msg-empty">（无文本内容：可能是纯工具调用 / 多模态分片）</div>'
-                : `<div class="hc-msg-preview" data-text="preview">${msgText.previewHtml}</div><pre class="hc-msg-full" data-text="full" style="display:none;">${msgText.fullHtml}</pre>`}</div>
-        </div>`;
-}
-
-// 行事件：点行展开/收起全文；两个图标 = 开「条目来源」子窗（世界书消息）/ 展开「本条内检索」
-function bindContextRowEvents(root) {
-    root.querySelectorAll('.hc-msg').forEach(row => {
-        const i = Number(row.getAttribute('data-i'));
-        row.onclick = (ev) => {
-            if (ev.target?.closest?.('.hc-icon-btn, .hc-msg-search')) return; // 图标 / 检索行不触发展开
-            if (ctxExpanded.has(i)) ctxExpanded.delete(i); else ctxExpanded.add(i);
-            refreshMsgTexts();
-            applyHitCursor();
-        };
-        row.querySelector('.hc-msg-search-btn')?.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            openMsgSearch(i);
-        });
-        row.querySelector('.hc-wi-expand')?.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            openWiMsgPopup(i);   // 开「条目来源」子窗（开在原可见窗的另一侧）
-        });
-        const bar = row.querySelector('.hc-msg-search');
-        const input = bar?.querySelector('.hc-msg-search-input');
-        input?.addEventListener('input', () => {
-            if (!ctxMsgSearch || ctxMsgSearch.i !== i) return;   // 只有当前这条的检索行在改状态
-            ctxMsgSearch.term = input.value;
-            ctxMsgHitCursor = -1;
-            refreshMsgTexts();
-            applyHitCursor();
-        });
-        input?.addEventListener('keydown', (ev) => {
-            if (ev.key === 'Enter') {
-                ev.preventDefault();
-                jumpCtxHit(ev.shiftKey ? -1 : 1);
-            }
-        });
-        bar?.querySelectorAll('[data-nav]').forEach(btn => {
-            btn.addEventListener('click', (ev) => {
-                ev.stopPropagation();
-                const nav = btn.getAttribute('data-nav');
-                if (nav === 'close') {
-                    closeMsgSearch();
-                    return;
-                }
-                jumpCtxHit(nav === 'next' ? 1 : -1);
-            });
-        });
-    });
-}
-
-// 打开某条消息的「本条内检索」（同一时刻只允许一条；其余收起并清空）
-function openMsgSearch(i) {
-    const listEl = document.getElementById('hide-context-body');
-    ctxMsgSearch = { i, term: '' };
-    ctxMsgHitCursor = -1;
-    ctxMsgHitCount = 0;
-    listEl?.querySelectorAll('.hc-msg-search').forEach(bar => {
-        const on = Number(bar.getAttribute('data-i')) === i;
-        bar.style.display = on ? 'flex' : 'none';
-        const inp = bar.querySelector('.hc-msg-search-input');
-        if (!inp) return;
-        if (on) inp.focus(); else inp.value = '';
-    });
-    refreshMsgTexts();
-    applyHitCursor();
-}
-
-function closeMsgSearch() {
-    const listEl = document.getElementById('hide-context-body');
-    ctxMsgSearch = null;
-    ctxMsgHitCursor = -1;
-    ctxMsgHitCount = 0;
-    listEl?.querySelectorAll('.hc-msg-search').forEach(bar => {
-        bar.style.display = 'none';
-        const inp = bar.querySelector('.hc-msg-search-input');
-        if (inp) inp.value = '';
-    });
-    refreshMsgTexts();
-    applyHitCursor();
-}
-
-// 逐条刷新正文容器（摘要/全文切换 + 高亮 + 命中编号）。**只换这两个容器的内容**，
-// 行容器（.hc-msg-body）本身保持不动 → 内部滚动条的绑定与滚动位置都不会被检索重绘打断。
-// 编号口径：整窗检索的命中编进 data-hit，"本条内检索"接管的那条编进 data-mhit（互不干扰）。
-function refreshMsgTexts() {
-    const bodyEl = document.getElementById('hide-context-body');
-    if (!bodyEl || !ctxDump) return;
-    let hitBase = 0, msgHitBase = 0;
-    const msgTerm = (ctxMsgSearch?.term || '');
-    const msgIndex = ctxMsgSearch ? ctxMsgSearch.i : null;
-    bodyEl.querySelectorAll('.hc-msg').forEach(row => {
-        const i = Number(row.getAttribute('data-i'));
-        const m = ctxMsgByIndex.get(i);
-        if (!m) return;
-        const local = (i === msgIndex && !!msgTerm.trim());
-        const term = local ? msgTerm : ctxSearchTerm;
-        const attr = local ? 'data-mhit' : 'data-hit';
-        const base = local ? msgHitBase : hitBase;
-        const full = String(m.text ?? '');
-        const preview = ctxPreviewText(full);
-        // 检索时若"全文里的命中"多于摘要里能看到的，就自动展开全文——否则跳得到、看不见
-        const fullHits = contextSearchHits(full, term).length;
-        const previewHits = contextSearchHits(preview, term).length;
-        const showFull = ctxExpanded.has(i) || (fullHits > 0 && fullHits > previewHits);
-        const t = ctxMsgTextHtml(m, { term, attr, base });
-        if (t.empty) return;
-        const previewEl = row.querySelector('.hc-msg-preview');
-        const fullEl = row.querySelector('.hc-msg-full');
-        // 只保留"当前展示的那一份"里的标记：另一份清空，避免隐藏容器里的命中占掉编号（跳转跳不动）
-        if (previewEl) {
-            previewEl.innerHTML = showFull ? '' : t.previewHtml;
-            previewEl.style.display = showFull ? 'none' : '';
-        }
-        if (fullEl) {
-            fullEl.innerHTML = showFull ? t.fullHtml : '';
-            fullEl.style.display = showFull ? 'block' : 'none';
-        }
-        const n = showFull ? t.fullCount : t.previewCount;
-        if (local) msgHitBase += n; else hitBase += n;
-    });
-    ctxHitCount = hitBase;
-    ctxMsgHitCount = msgHitBase;
+// 筛选菜单按钮的文案 + 选中态（第二十九轮：两个维度跟着工具栏一起搬到目录窗；非"全部"时按钮高亮）
+function syncCtxFilterButtons() {
+    const el = document.getElementById(CTX_OUTLINE_ID);
+    if (!el) return;
+    for (const [btnId, textId, value, options] of [
+        ['hco-filter-source', 'hco-filter-source-text', ctxSourceFilter, CTX_SOURCE_OPTIONS],
+        ['hco-filter-role', 'hco-filter-role-text', ctxRoleFilter, CTX_ROLE_OPTIONS],
+    ]) {
+        const btn = el.querySelector(`#${btnId}`);
+        const textEl = el.querySelector(`#${textId}`);
+        if (textEl) textEl.textContent = (options.find(([v]) => v === value) || options[0])[1];
+        btn?.classList.toggle('active', value !== 'all');
+    }
 }
 
 // ── 跳转时"只滚我们自己的滚动容器"（**绝不用 scrollIntoView**）────────────────────────
@@ -6406,8 +6124,8 @@ function scrollLayerTo(container, target, block = 'nearest') {
     if (clamped !== cur) container.scrollTop = clamped;
 }
 
-// 把 target 带进 root 的视野：内层（`.hc-msg-body` / `.hc-msg-full` —— 命中在正文里时）先"最小滚动"，
-// 最外层 root 按 block 语义滚动。**root 之上的容器（含文档）一个都不碰**。
+// 把 target 带进 root 的视野：内层滚动容器先"最小滚动"，最外层 root 按 block 语义滚动。
+// **root 之上的容器（含文档）一个都不碰**。
 function scrollIntoViewWithin(root, target, block = 'nearest') {
     if (!root || !target) return;
     const inner = [];
@@ -6418,96 +6136,50 @@ function scrollIntoViewWithin(root, target, block = 'nearest') {
     scrollLayerTo(root, target, block);
 }
 
-// 命中游标：给当前命中加类 + 滚到可见处。jump=false（输入/筛选后）只标号不滚动。
-function applyHitCursor({ jump = false } = {}) {
-    const bodyEl = document.getElementById('hide-context-body');
-    if (!bodyEl) return;
-    const local = !!ctxMsgSearch && !!ctxMsgSearch.term.trim();
-    const total = local ? ctxMsgHitCount : ctxHitCount;
-    if (local) {
-        if (ctxMsgHitCursor >= total) ctxMsgHitCursor = total ? total - 1 : -1;
-        if (ctxMsgHitCursor < 0 && total) ctxMsgHitCursor = 0;
-    } else {
-        if (ctxHitCursor >= total) ctxHitCursor = total ? total - 1 : -1;
-        if (ctxHitCursor < 0 && total) ctxHitCursor = 0;
-    }
-    const cursor = local ? ctxMsgHitCursor : ctxHitCursor;
-    bodyEl.querySelectorAll('mark.hc-hit-current').forEach(el => el.classList.remove('hc-hit-current'));
-    bodyEl.querySelectorAll('.hc-msg-hit-current').forEach(el => el.classList.remove('hc-msg-hit-current'));
-    const all = bodyEl.querySelectorAll(`mark[${local ? 'data-mhit' : 'data-hit'}]`);
-    const target = (cursor >= 0 && cursor < all.length) ? all[cursor] : null;
+// 目录检索的"命中游标"：给当前命中加类 + 把它滚进目录的视野（只滚目录自己的容器）。
+// 命中编号（data-hit）由 renderContextOutlineList 渲染时就编好了，顺序 = DOM 顺序 = 阅读顺序。
+function applyOutlineHitCursor({ jump = false } = {}) {
+    const listEl = document.getElementById('hco-body');
+    if (!listEl) return;
+    if (ctxHitCursor >= ctxHitCount) ctxHitCursor = ctxHitCount ? ctxHitCount - 1 : -1;
+    if (ctxHitCursor < 0 && ctxHitCount) ctxHitCursor = 0;
+    listEl.querySelectorAll('mark.hc-hit-current').forEach(el => el.classList.remove('hc-hit-current'));
+    listEl.querySelectorAll('.hco-hit-current').forEach(el => el.classList.remove('hco-hit-current'));
+    const all = listEl.querySelectorAll('mark[data-hit]');
+    const target = (ctxHitCursor >= 0 && ctxHitCursor < all.length) ? all[ctxHitCursor] : null;
     if (target) {
         target.classList.add('hc-hit-current');
-        const rowEl = target.closest ? target.closest('.hc-msg') : null;
-        if (rowEl) rowEl.classList.add('hc-msg-hit-current');
-        // 只滚查看器自己的滚动容器（含命中所在的 .hc-msg-body / .hc-msg-full 内层）——见 scrollIntoViewWithin
-        if (jump) scrollIntoViewWithin(bodyEl, target, 'nearest');
+        const rowEl = target.closest ? target.closest('.hco-row') : null;
+        if (rowEl) rowEl.classList.add('hco-hit-current');
+        if (jump) scrollIntoViewWithin(listEl, target, 'nearest');
     }
     updateCtxCounts();
 }
 
 // 上/下一个命中（环形）：无命中则不动；尚未跳转过时按方向取首个/末个
-function jumpCtxHit(delta) {
-    const local = !!ctxMsgSearch && !!ctxMsgSearch.term.trim();
-    const total = local ? ctxMsgHitCount : ctxHitCount;
-    if (!total) return;
-    let cur = local ? ctxMsgHitCursor : ctxHitCursor;
-    cur = (cur < 0) ? (delta > 0 ? 0 : total - 1) : ((cur + delta + total) % total);
-    if (local) ctxMsgHitCursor = cur; else ctxHitCursor = cur;
-    applyHitCursor({ jump: true });
+function jumpContextOutlineHit(delta) {
+    if (!ctxHitCount) return;
+    ctxHitCursor = (ctxHitCursor < 0)
+        ? (delta > 0 ? 0 : ctxHitCount - 1)
+        : ((ctxHitCursor + delta + ctxHitCount) % ctxHitCount);
+    applyOutlineHitCursor({ jump: true });
 }
 
-// 计数文案：整窗检索"第 n / 共 m 个命中"、单条内检索同理、以及"显示 x / y 条消息"
+// 计数文案：目录检索"第 n / 共 m 个命中" + "显示 x / y 条消息"
 function updateCtxCounts() {
     const setText = (id, text) => {
         const el = document.getElementById(id);
         if (el) el.textContent = text;
     };
     const fmt = (cursor, total) => (total ? `${cursor < 0 ? 1 : cursor + 1}/${total}` : '无命中');
-    setText('hc-search-count', ctxSearchTerm.trim() ? fmt(ctxHitCursor, ctxHitCount) : '');
-    const listEl = document.getElementById('hide-context-body');
-    const bar = (ctxMsgSearch && listEl) ? listEl.querySelector(`.hc-msg-search[data-i="${ctxMsgSearch.i}"]`) : null;
-    const countEl = bar ? bar.querySelector('.hc-msg-search-count') : null;
-    if (countEl) countEl.textContent = (ctxMsgSearch?.term || '').trim() ? fmt(ctxMsgHitCursor, ctxMsgHitCount) : '';
+    setText('hco-search-count', ctxSearchTerm.trim() ? fmt(ctxHitCursor, ctxHitCount) : '');
     const all = ctxDump?.messages?.length || 0;
-    setText('hc-count', (all && ctxVisibleCount !== all) ? `显示 ${ctxVisibleCount} / ${all} 条` : '');
+    setText('hco-count', (all && ctxVisibleCount !== all) ? `显示 ${ctxVisibleCount} / ${all} 条` : '');
 }
 
-// 列表整段重绘（打开查看器 / 切换筛选时）：行结构建好后再填正文（refreshMsgTexts）
-function renderContextList() {
-    const listEl = document.getElementById('hide-context-body');
-    if (!listEl) return;
-    ctxMsgSearch = null;   // 重绘会丢掉"本条检索"的行状态，一并复位
-    ctxMsgHitCursor = -1;
-    ctxMsgHitCount = 0;
-    const all = ctxDump?.messages || [];
-    const visible = all.filter(m => ctxMessageVisible(m, { source: ctxSourceFilter, role: ctxRoleFilter }));
-    ctxVisibleCount = visible.length;
-    if (!visible.length) {
-        listEl.innerHTML = `<div class="tub-empty-state">${all.length ? '当前筛选条件下没有消息。' : '这次发送没有可显示的消息。'}</div>`;
-        ctxHitCount = 0;
-        ctxHitCursor = -1;
-        applyHitCursor();
-        refreshContextOutlineIfOpen();   // 目录子窗若开着：消息列表跟着一起刷新
-        return;
-    }
-    listEl.innerHTML = visible.map(ctxMessageRowHtml).join('');
-    // 每条消息体的内部滚动区：滚动条与三个子窗同款（默认隐藏 + 三档显色）
-    listEl.querySelectorAll('.hc-msg-body').forEach(body => initHiddenScrollbar(body));
-    bindContextRowEvents(listEl);
-    refreshMsgTexts();
-    applyHitCursor();
-    refreshContextOutlineIfOpen();   // 目录子窗若开着：消息列表跟着一起刷新
-}
-
-// 打开/刷新完整上下文查看器。model 用来找当前锚点对应的 dump（含模拟锚定）。
-function openContextViewer(model) {
-    const el = ensureContextViewer();
-    const bodyEl = document.getElementById('hide-context-body');
-    const titleEl = document.getElementById('hide-context-title');
-    const subEl = document.getElementById('hide-context-sub');
-    if (!bodyEl) return;
-
+// 载入一份快照（第二十九轮：原 `openContextViewer` 的状态部分；开窗由 openContextOutlinePopup 负责）。
+// model 用来找当前锚点对应的 dump（含模拟锚定）；不传 = 沿用当前 ctxModel。
+function loadContextSnapshot(model) {
     const chatId = getContext?.()?.chatId;
     const anchorId = model?.isSim ? SIM_ANCHOR_ID : model?.index;
     const dump = (chatId && anchorId !== undefined && anchorId !== null)
@@ -6515,57 +6187,24 @@ function openContextViewer(model) {
         : null;
 
     contextViewerKey = (dump ? contextDumpKey(chatId, anchorId) : null);
-    // 换快照 = 换内容：目录 / 条目来源都渲染的是旧快照 → 直接收起（它们各自会清空层级栈，避免"返回"回到旧快照的层级）；
-    // 随后由 focusChildPopup 接管本窗显示（本窗开在原可见窗的另一侧，原可见窗原地不动）
+    // 换快照 = 换内容：条目来源 / 整轮层级都收起（随后由 openContextOutlinePopup 重新起一层）
     closeWiMsgPopup();
-    closeContextOutlinePopup();
-    closeChildStack();   // 换快照 = **重置**：整轮层级结束（随后由 focusChildPopup 重新起一层）
+    closeChildStack();
     ctxModel = model || null;
     ctxDump = dump || null;
     ctxMsgByIndex = new Map((ctxDump?.messages || []).map(m => [m.i, m]));
-    // 视图状态复位（检索 / 筛选 / 展开都不跨快照沿用）
+    // 视图状态复位（检索 / 筛选 / 折叠都不跨快照沿用）
     ctxSearchTerm = '';
     ctxSourceFilter = 'all';
     ctxRoleFilter = 'all';
-    ctxExpanded = new Set();
-    ctxMsgSearch = null;
     ctxVisibleCount = 0;
     ctxHitCount = 0;
     ctxHitCursor = -1;
-    ctxMsgHitCount = 0;
-    ctxMsgHitCursor = -1;
-    const sInput = document.getElementById('hc-search-input');
+    ctxOutlineActiveIndex = null;
+    const sInput = document.getElementById('hco-search-input');
     if (sInput) sInput.value = '';
     syncCtxFilterButtons();
-
-    if (titleEl) titleEl.textContent = '完整上下文';
-    if (subEl) {
-        subEl.innerHTML = dump
-            ? `<span class="hide-entry-book">${dump.source === 'simulate' ? '模拟发送' : '实际发送'} · ${dump.messages.length} 条消息 · 共 ${dump.total} tokens</span>`
-            : '';
-    }
-
-    if (!dump) {
-        const listEl = document.getElementById('hide-context-body');
-        if (listEl) {
-            listEl.innerHTML = `<div class="tub-empty-state">这份锚点还没有快照。<br>
-                点下面按钮即可**用当前上下文静默跑一次模拟发送**生成快照（<b>不用重新生成消息</b>）；
-                也可以直接在统计页点「模拟发送」后选中它。<br>
-                <button type="button" class="hcs-ctx-btn" id="hc-make-snapshot">立即生成快照（模拟发送）</button></div>`;
-            const mkBtn = document.getElementById('hc-make-snapshot');
-            if (mkBtn) mkBtn.onclick = () => refreshContextSnapshot({ openViewer: true });
-        }
-        updateCtxCounts();
-        focusChildPopup('hide-helper-context-viewer');
-        el.style.display = 'flex';
-        positionChildPopup(el);
-        return;
-    }
-
-    renderContextList();
-    focusChildPopup('hide-helper-context-viewer');   // 本窗开在原可见窗的另一侧（父窗原地不动）
-    el.style.display = 'flex';
-    positionChildPopup(el);
+    updateCtxCounts();
 }
 // ==================== 聊天统计 · 世界书消息条目来源子窗（第二十一轮新增；第二十四轮：父窗原位 + 子窗另一侧） ====================
 // 入口：完整上下文里**世界书来源**的消息 → `hc-msg-tokens` 里的展开图标（放大镜左侧）。
@@ -6663,7 +6302,8 @@ function ensureWiMsgPopup() {
 function closeWiMsgPopup() {
     wiMsgPopupIndex = null;
     wiMsgPopupMsg = null;
-    closeChildPopupAt('hide-helper-wi-msg-popup');   // × ：只退一层（父窗留下）
+    // closeChildPopupAt 内部会按"退回目录 + 成对窗口挂起"的判定自动放回右侧完整上下文（见该函数末尾）
+    closeChildPopupAt('hide-helper-wi-msg-popup');   // × ：只退一层（父窗 = 目录 留下）
 }
 
 // 打开某条消息的「条目来源」子窗（i = 该消息在快照里的序号）
@@ -6671,7 +6311,10 @@ function openWiMsgPopup(i) {
     const m = ctxMsgByIndex.get(Number(i));
     if (!m) return;
     const el = ensureWiMsgPopup();
-    focusChildPopup('hide-helper-wi-msg-popup');   // 本窗开在原可见窗（查看器）的另一侧，它原地不动
+    // 第二十九轮：入口改到「上下文目录」的世界书消息行 → 本窗开在目录的另一侧；
+    // 同时右侧「完整上下文」暂时收起（成对模式挂起），关掉本窗后自动恢复成对窗口。
+    focusChildPopup('hide-helper-wi-msg-popup');
+    suspendOutlineMergeForChild();
     // 每次打开都按这条消息复位：过滤 / 检索不跨消息沿用
     wiMsgPopupIndex = m.i;
     wiMsgPopupMsg = m;
@@ -6814,32 +6457,33 @@ function refreshWiMsgList() {
 }
 
 // 从「条目来源」子窗跳到内容区里该条目的正文首行（第二十七轮 R2 建议⑥）：
-// 成对窗口没开就先开出来（`openContextOutlinePopup` 会把查看器切到台前再进成对模式），然后复用条目跳转。
+// 成对窗口没开就先开出来；**挂起中**（正在看条目来源）先关掉它、回到成对窗口，再滚到该条目正文。
+// ⚠️ 不能"边开着条目来源边把内容窗放回来"：那样屏幕上会同时有目录 / 条目来源 / 内容三个窗，
+//    而 layoutChildPair 的成对分支会把当前窗（条目来源）收起 → 三窗全灭（实测踩过）。
 async function jumpToMergedFromWiMsg(i, entry) {
     if (i === null || i === undefined) return;
+    if (ctxMergeSuspended) closeWiMsgPopup();      // 关掉子窗 → closeChildPopupAt 会 resume 成对窗口
     if (!ctxMergeMode) openContextOutlinePopup();
     await jumpContextOutlineToEntry(i, entry || {});
 }
 
-// ==================== 聊天统计 · 上下文目录（目录页）+ 完整上下文·合并内容（内容区） ====================
-// 第二十七轮（用户口径：「目录 = 目录页、右侧 = 内容区」）：
-//   ① 点查看器工具栏 `hc-filters` 最右的目录图标（`#hc-wi-expand-all`）→ 一次开出**两个同级窗**：
-//      `#hide-helper-ctx-outline-popup`（目录，贴左）+ `#hide-helper-ctx-merged-popup`（内容，沿用查看器原来的位置与尺寸），
-//      **查看器收起**（用户选择："两个：目录(左) + 合并内容(右)，查看器收起"）。两窗 = 一对，关掉任一个都回到查看器。
-//   ② 内容区显示的是**这次真正发送出去的完整上下文字符**：逐条槽位的 text 首尾相接、**不再按"条目"分隔**，
-//      看起来就是一整篇连续文本；每条的 `<pre data-i>` 只当"定位锚"用（目录靠它跳转）。
-//   ③ 点目录里的消息行（`hco-item` / `hco-msg-head`）→ 内容区滚到**该条消息的第一行**；
-//      点条目行（`tub-nli-label` 所在整行）→ 滚到**该条目正文的第一行**（读不到正文时退回所属消息的第一行）。
-//      ⚠️ 第二十轮起"点目录条目行 = 开条目详情子窗"已按用户口径改成**导航**（条目详情仍可从「条目来源」子窗打开）。
-//   ④ 位置全部由 `layoutOutlineMergePair()` 一处写入；`layoutChildPair()` 在成对模式下**直接转交**给它。
-//  ⚠️ 跳转一律走 `scrollIntoViewWithin` / `scrollLayerTo`（只滚我们自己的容器）——
+// ==================== 聊天统计 · 上下文目录（目录页）+ 完整上下文（内容区） ====================
+// 第二十七轮（用户口径：「目录 = 目录页、右侧 = 内容区」）。
+// 第二十九轮（用户口径①：「直接去除点击『总共』出现的 hide-helper-context-viewer 弹窗，直接显示
+//   上下文目录和右侧完整上下文弹窗」+ 追问后明确「要去掉的是第一层那个内容重复的『完整上下文』查看器」）：
+//   ① **查看器窗口整体删除** —— 点「总共」直接开出这一对窗口：
+//      `#hide-helper-ctx-outline-popup`（目录，左）+ `#hide-helper-ctx-merged-popup`（完整上下文，右）；
+//   ② 查看器工具栏的**筛选（来源 / 角色）与检索**整套平移到目录窗头部（口径②），目录窗不再有副标题行；
+//   ③ 「条目来源」子窗改由**目录里世界书消息行的图标**打开（查看器删了，原来的入口随之消失）；
+//      打开它时成对窗口**暂停**（右侧内容窗暂时收起），关掉它再恢复成对窗口。
+// ⚠️ 跳转一律走 `scrollIntoViewWithin` / `scrollLayerTo`（只滚我们自己的容器）——
 //     用 `scrollIntoView` 会连带滚文档 → 整个插件 UI 跟着整页上移（第二十轮 R1 用户实测）。
 const CTX_OUTLINE_MIN_HEIGHT = 420;
 let ctxOutlineActiveIndex = null;     // 目录里"最近跳到过"的消息序号（左侧描边；重绘后沿用）
-// ⚠️ 第二十七轮 R4：目录检索框（原 `ctxOutlineTerm` / `.hco-search*`）已按用户口径**彻底移除** ——
-//    目录恒显示全部消息。检索纯函数 `contextOutlineMatch` 保留（离线单测仍在用，将来要恢复也现成）。
-let ctxMergeMode = false;             // 「目录 + 合并内容」成对模式开着（查看器已被收起）
-let ctxMergeViewerSlot = null;        // 进入该模式时查看器自己的槽位（合并内容窗沿用它的位置与尺寸）
+let ctxMergeMode = false;             // 「目录 + 完整上下文」成对模式开着
+let ctxMergeViewerSlot = null;        // 这一对的落点（内容窗的槽位；目录贴在它左侧）
+let ctxMergeSuspended = false;        // 成对模式暂时让位（从目录里打开「条目来源」时）——关掉子窗后恢复
+let ctxSearchRowOpen = false;         // 检索行是否展开（默认收起，点放大镜切换）
 // 第二十八轮：项头/分组头的**折叠状态**（点 `hco-head hco-row` 折叠/展开下方列表）。
 // 键 = 该项头行的 `data-i`（分组取组首那条）；只在"打开目录"时清零（避免换快照后折叠错项）。
 const ctxOutlineCollapsed = new Set();
@@ -6876,10 +6520,29 @@ function ensureContextOutlinePopup() {
     $('body').append(`
         <div id="hide-helper-ctx-outline-popup" class="hide-helper-popup hide-helper-ctx-outline-popup" style="display: none;">
             <button id="hide-helper-ctx-outline-close" class="hide-helper-popup-close-icon" title="关闭">&times;</button>
+            <!-- 第二十九轮口径①②：查看器删除后，它的**筛选（来源 / 角色）+ 检索**整套平移到本窗头部；
+                 原来的副标题行（.hide-entry-sub / #hco-sub）按用户口径去掉，索引信息挪进标题行的 title。 -->
             <div class="hide-entry-head">
                 <div class="hide-entry-name" id="hco-title">上下文目录</div>
-                <div class="hide-entry-sub" id="hco-sub"></div>
-                <!-- 第二十七轮 R4：目录检索框（原 .hco-search / 放大镜开关）已按用户口径移除 -->
+                <div class="hc-toolbar" id="hco-toolbar">
+                    <div class="hc-filters">
+                        <button type="button" class="hc-menu-btn" id="hco-filter-source" title="按来源过滤（只影响下方目录列表）">
+                            <span class="hc-menu-btn-label">来源</span><span class="hc-menu-btn-value" id="hco-filter-source-text">全部</span>
+                        </button>
+                        <button type="button" class="hc-menu-btn" id="hco-filter-role" title="按角色过滤（只影响下方目录列表）">
+                            <span class="hc-menu-btn-label">角色</span><span class="hc-menu-btn-value" id="hco-filter-role-text">全部</span>
+                        </button>
+                        <div class="hc-count" id="hco-count"></div>
+                        <button type="button" class="hc-icon-btn hc-search-toggle" id="hco-search-toggle" title="显示/隐藏检索框">${HC_ICON_SEARCH}</button>
+                    </div>
+                    <div class="hc-search hc-search-row" id="hco-search-row" style="display: none;">
+                        <input type="text" id="hco-search-input" class="hc-search-input" placeholder="检索目录（消息正文 / 条目名 / 来源）…">
+                        <span class="hc-search-count" id="hco-search-count"></span>
+                        <button type="button" class="hc-icon-btn" id="hco-hit-prev" title="上一个命中（Shift+Enter）">${HC_ICON_UP}</button>
+                        <button type="button" class="hc-icon-btn" id="hco-hit-next" title="下一个命中（Enter）">${HC_ICON_DOWN}</button>
+                        <button type="button" class="hc-icon-btn" id="hco-search-clear" title="清空检索">${HC_ICON_ERASER}</button>
+                    </div>
+                </div>
             </div>
             <div class="hide-entry-body hco-list" id="hco-body"></div>
         </div>
@@ -6888,19 +6551,90 @@ function ensureContextOutlinePopup() {
     $('#hide-helper-ctx-outline-close').on('click', () => closeContextOutlinePopup());
     // 滚动条与其余子窗同款（默认隐藏 + 滚动/悬停/拖拽三档显色，见 initHiddenScrollbar 与 CSS 的 .hh-sb-*）
     initHiddenScrollbar(el.querySelector('#hco-body'));
+    bindContextOutlineToolbar(el);
+    // 键盘导航（↑/↓、J/K、Home/End）：文档级只绑一次（第二十九轮：原来绑在已删除的查看器上，现随工具栏一起搬到本窗）
+    if (!ctxHotkeysBound && typeof document.addEventListener === 'function') {
+        ctxHotkeysBound = true;
+        document.addEventListener('keydown', handleContextHotkeys);
+    }
     const theme = extension_settings[extensionName]?.theme || 'light';
     if (theme === 'dark') el.setAttribute('data-theme', 'dark');
     return el;
 }
 
-// 「完整上下文」窗（内容区，第二十七轮 R4 起标题就叫"完整上下文"）：只展示内容，工具栏/导航全在左侧目录里
+// 目录窗头部的工具栏（第二十九轮：整套从查看器平移过来）。
+// 口径：**筛选与检索只作用于左侧目录列表**（右侧完整上下文恒显示全部内容——它是"实际发送的字符"，不该被裁剪）。
+function bindContextOutlineToolbar(el) {
+    const searchRow = el.querySelector('#hco-search-row');
+    const searchToggle = el.querySelector('#hco-search-toggle');
+    const searchInput = el.querySelector('#hco-search-input');
+    const applySearchRowState = (open) => {
+        if (searchRow) searchRow.style.display = open ? 'flex' : 'none';
+        searchToggle?.classList.toggle('active', open);
+        if (open) searchInput?.focus();
+        else if (ctxSearchTerm.trim()) {
+            if (searchInput) searchInput.value = '';
+            ctxSearchTerm = '';
+            ctxHitCursor = -1;
+            renderContextOutlineList();
+        }
+    };
+    applySearchRowState(ctxSearchRowOpen);
+    searchToggle?.addEventListener('click', () => {
+        ctxSearchRowOpen = !ctxSearchRowOpen;
+        applySearchRowState(ctxSearchRowOpen);
+    });
+    searchInput?.addEventListener('input', () => {
+        ctxSearchTerm = searchInput.value;
+        ctxHitCursor = -1;
+        renderContextOutlineList();     // 整段重绘：目录行同时就是命中高亮的载体
+    });
+    searchInput?.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            jumpContextOutlineHit(ev.shiftKey ? -1 : 1);
+        } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            ev.stopPropagation();       // 别让 Esc 冒到文档上把整个窗口关掉（这是"退出输入"）
+            searchInput.value = '';
+            ctxSearchTerm = '';
+            ctxHitCursor = -1;
+            renderContextOutlineList();
+        }
+    });
+    el.querySelector('#hco-hit-prev')?.addEventListener('click', () => jumpContextOutlineHit(-1));
+    el.querySelector('#hco-hit-next')?.addEventListener('click', () => jumpContextOutlineHit(1));
+    el.querySelector('#hco-search-clear')?.addEventListener('click', () => {
+        if (searchInput) { searchInput.value = ''; searchInput.focus(); }
+        ctxSearchTerm = '';
+        ctxHitCursor = -1;
+        renderContextOutlineList();
+    });
+    el.querySelector('#hco-filter-source')?.addEventListener('click', (ev) => {
+        toggleCtxFilterMenu(ev.currentTarget, {
+            options: CTX_SOURCE_OPTIONS, current: ctxSourceFilter,
+            onPick: (value) => { ctxSourceFilter = value; ctxHitCursor = -1; syncCtxFilterButtons(); renderContextOutlineList(); },
+        });
+    });
+    el.querySelector('#hco-filter-role')?.addEventListener('click', (ev) => {
+        toggleCtxFilterMenu(ev.currentTarget, {
+            options: CTX_ROLE_OPTIONS, current: ctxRoleFilter,
+            onPick: (value) => { ctxRoleFilter = value; ctxHitCursor = -1; syncCtxFilterButtons(); renderContextOutlineList(); },
+        });
+    });
+    syncCtxFilterButtons();
+}
+
+// 「完整上下文」窗（内容区）：只展示内容，工具栏/导航全在左侧目录里。
+// 第二十九轮口径③：头部改成**一行** —— 标题在左、`.hide-entry-sub` 贴标题行**最右侧**（右对齐），
+//   图例（`.hcm-legend`）也从副标题行里提上来、同样右对齐（见 renderMergedContext）。
 function ensureContextMergedPopup() {
     let el = document.getElementById(CTX_MERGED_ID);
     if (el) return el;
     $('body').append(`
         <div id="hide-helper-ctx-merged-popup" class="hide-helper-popup hide-helper-ctx-merged-popup" style="display: none;">
             <!-- 第二十七轮 R2 用户口径：**去掉右上角的关闭按钮**（一对窗口靠"目录的 × / Esc / 再点图标"收起） -->
-            <div class="hide-entry-head">
+            <div class="hide-entry-head hcm-head">
                 <div class="hide-entry-name" id="hcm-title">完整上下文</div>
                 <div class="hide-entry-sub" id="hcm-sub"></div>
             </div>
@@ -6917,66 +6651,85 @@ function ensureContextMergedPopup() {
     return el;
 }
 
-// 进入成对模式：查看器收起（它的槽位留给合并内容窗），本窗与内容窗都由本模式摆位
-function enterContextOutlineMergeMode(viewerEl) {
-    // ⚠️ 顺序要紧：先在"查看器还是当前窗"时压栈（它是 Esc / × 的退回目标），再收起它
-    const slot = viewerEl ? readWindowSlot(viewerEl) : null;
+// 进入成对模式：这一对是**顶层的入口窗**（第二十九轮起没有"第一层查看器"了，槽位取主弹窗的槽位）
+function enterContextOutlineMergeMode() {
     focusChildPopup(CTX_OUTLINE_ID);
-    ctxMergeViewerSlot = slot || captureMainSlot();
+    ctxMergeViewerSlot = captureMainSlot();
     ctxMergeMode = true;
+    ctxMergeSuspended = false;
     // 每次打开都从"全展开"开始（折叠状态是临时 UI 偏好，不跨快照沿用；条目坐标缓存一并作废）
     ctxOutlineCollapsed.clear();
     ctxEntryLayouts.clear();
     ctxEntryLayoutToken = -1;
     ctxOutlineActiveEntry = '';
-    if (viewerEl) viewerEl.style.display = 'none';
 }
 
-// 退出成对模式：状态清掉 + 内容窗收起（查看器的显示由 closeChildPopupAt 的"新当前窗"逻辑恢复）
+// 退出成对模式：状态清掉 + 内容窗收起
 function exitContextOutlineMergeMode() {
-    if (!ctxMergeMode && !ctxMergeViewerSlot) return;
-    closeCtxFilterMenu();   // 查看器收起 = 工具栏也收起 → 菜单不能留在屏幕上
+    if (!ctxMergeMode && !ctxMergeViewerSlot && !ctxMergeSuspended) return;
+    closeCtxFilterMenu();   // 窗口收起 = 工具栏也收起 → 菜单不能留在屏幕上
     ctxMergeMode = false;
+    ctxMergeSuspended = false;
+    ctxMergeViewerSlot = null;
     const mrgEl = document.getElementById(CTX_MERGED_ID);
     if (mrgEl) mrgEl.style.display = 'none';
 }
 
 function closeContextOutlinePopup() {
     ctxOutlineActiveIndex = null;
-    closeChildPopupAt(CTX_OUTLINE_ID);   // × / 图标 toggle / Esc：只退一层（回到查看器；成对窗一并收起）
+    ctxMergeSuspended = false;
+    closeChildPopupAt(CTX_OUTLINE_ID);   // × / Esc：两窗一起收起，回到主弹窗
 }
 
 function closeContextMergedPopup() {
-    // 「合并内容」与「目录」是一对：关掉它 = 两窗一起收起、查看器回到台前
+    // 「完整上下文」与「目录」是一对：关掉它 = 两窗一起收起
     closeContextOutlinePopup();
 }
 
-// 图标点击：开着就收起（与「聊天」统计框的 toggle 一致）
-function toggleContextOutlinePopup() {
+// 「总共」统计框：点击开/关这一对窗口（第二十九轮：不再有第一层查看器）
+function toggleContextOutlineFromStats(model) {
     const el = document.getElementById(CTX_OUTLINE_ID);
     if (el && el.style.display !== 'none') {
         closeContextOutlinePopup();
         return;
     }
-    openContextOutlinePopup();
+    openContextOutlinePopup(model);
 }
 
-function openContextOutlinePopup() {
-    const viewerEl = document.getElementById('hide-helper-context-viewer');
-    if (!viewerEl) return;
-    // 查看器不在台前（被压在层级里 / 它只是父窗）时先切到台前：本次要拿它的槽位当落点
-    if (currentChildId() !== 'hide-helper-context-viewer') {
-        focusChildPopup('hide-helper-context-viewer');
-        viewerEl.style.display = 'flex';
-    }
+// 图标点击：开着就收起
+function toggleContextOutlinePopup(model) {
+    toggleContextOutlineFromStats(model);
+}
+
+// 打开这一对窗口。model 用来找到当前锚点对应的快照（含模拟锚定）；
+// 不传时沿用 `ctxModel`（从目录里打开「条目来源」再回来时走这条）。
+function openContextOutlinePopup(model) {
     const outEl = ensureContextOutlinePopup();
     const mrgEl = ensureContextMergedPopup();
-    enterContextOutlineMergeMode(viewerEl);
+    if (model !== undefined && model !== null) loadContextSnapshot(model);
+    enterContextOutlineMergeMode();
     renderContextOutlineList();
     renderMergedContext();
     outEl.style.display = 'flex';
     mrgEl.style.display = 'flex';
-    layoutChildPair();   // 成对模式：落点由 layoutOutlineMergePair 写（目录在左、合并内容沿用查看器位置）
+    layoutChildPair();   // 成对模式：落点由 layoutOutlineMergePair 写（目录在左、完整上下文在右）
+}
+
+// 「条目来源」子窗开着时，右侧完整上下文暂时收起（屏幕上只留「目录 | 条目来源」，不再挤第三个窗）；
+// 关掉条目来源（或再点它的图标）→ 自动恢复成对窗口。
+function suspendOutlineMergeForChild() {
+    if (!ctxMergeMode) return;
+    ctxMergeSuspended = true;
+    const mrgEl = document.getElementById(CTX_MERGED_ID);
+    if (mrgEl) mrgEl.style.display = 'none';
+}
+
+function resumeOutlineMergeAfterChild() {
+    if (!ctxMergeMode || !ctxMergeSuspended) return;
+    ctxMergeSuspended = false;
+    const mrgEl = ensureContextMergedPopup();
+    mrgEl.style.display = 'flex';
+    layoutChildPair();
 }
 
 // 成对模式的落点（**唯一**写这两窗位置的地方）。用户口径："该弹窗（目录）显示在左侧。同时，右侧要出现一个同层级的弹窗"。
@@ -7022,7 +6775,7 @@ function layoutOutlineMergePair() {
     }
 }
 
-// 查看器重绘后同步目录（快照/筛选变了）：只在本子窗开着时做
+// 快照/筛选变化后同步目录（只在成对窗口开着时做）
 function refreshContextOutlineIfOpen() {
     const el = document.getElementById(CTX_OUTLINE_ID);
     if (el && el.style.display !== 'none') renderContextOutlineList();
@@ -7110,6 +6863,8 @@ function renderMergedContext() {
     ctxMergedRenderToken += 1;
     ctxMergedRenderedUpTo = -1;
     if (subEl) {
+        // 第二十九轮口径③：`.hide-entry-sub` 现在贴在标题行**最右侧**（右对齐），
+        // 图例也从"副标题里的一串"改成"副标题里的一个右对齐块"（CSS：`.hcm-head` 是 flex + `margin-left:auto`）。
         subEl.innerHTML = ctxDump
             ? `<span class="hide-entry-book">${ctxDump.source === 'simulate' ? '模拟发送' : '实际发送'} · ${all.length} 条消息 · 共 ${ctxDump.total} tokens</span>`
                 + `<span class="hcm-legend">${hcmLegendHtml(all)}</span>`
@@ -7117,7 +6872,7 @@ function renderMergedContext() {
     }
     if (!all.length) {
         bodyEl.innerHTML = `<div class="tub-empty-state">没有可用的完整上下文快照。<br>
-            打开「完整上下文」查看器里的「立即生成快照（模拟发送）」即可生成（**不用重新生成消息**）。</div>`;
+            在统计页点「模拟发送」，或用「立即生成快照（模拟发送）」生成即可（**不用重新生成消息**）。</div>`;
         return;
     }
     bodyEl.innerHTML = '<div class="hcm-text"></div>';
@@ -7221,21 +6976,29 @@ function outlineChatMesids(messages) {
 // 分组头单独用 `.hco-group-head`（点它跳到该组第一条）。
 function renderContextOutlineList() {
     const listEl = document.getElementById('hco-body');
-    const subEl = document.getElementById('hco-sub');
     if (!listEl) return;
     const all = ctxDump?.messages || [];
-    if (subEl) {
-        subEl.innerHTML = ctxDump
-            ? `<span class="hide-entry-book">${ctxDump.source === 'simulate' ? '模拟发送' : '实际发送'} · ${all.length} 条消息 · 共 ${ctxDump.total} tokens</span>`
+    // 第二十九轮口径②：目录窗不再有副标题行（`.hide-entry-sub` / `#hco-sub` 已删）——
+    // 快照的基本信息挪进标题的 title（悬停可见），不再占一行高度。
+    const titleEl = document.getElementById('hco-title');
+    if (titleEl) {
+        titleEl.textContent = '上下文目录';
+        titleEl.title = ctxDump
+            ? `${ctxDump.source === 'simulate' ? '模拟发送' : '实际发送'} · ${all.length} 条消息 · 共 ${ctxDump.total} tokens`
             : '';
     }
     if (!all.length) {
         listEl.innerHTML = `<div class="tub-empty-state">没有可用的完整上下文快照。<br>
-            打开「完整上下文」查看器里的「立即生成快照（模拟发送）」即可生成（**不用重新生成消息**）。</div>`;
+            在统计页点「模拟发送」生成即可（**不用重新生成消息**）。</div>`;
+        ctxVisibleCount = 0;
+        ctxHitCount = 0;
+        ctxHitCursor = -1;
+        updateCtxCounts();
         return;
     }
-    // 第二十七轮 R4：目录检索框已移除 → 目录恒显示全部消息（不再有"过滤后为空"的分支）
-    const shown = all;
+    // 第二十九轮：来源 / 角色筛选 + 检索（整套从查看器平移过来）→ 目录只列"当前可见"的消息
+    const shown = all.filter(m => ctxMessageVisible(m, { source: ctxSourceFilter, role: ctxRoleFilter }));
+    ctxVisibleCount = shown.length;
     const edges = contextSendableEdges(ctxModel || {});
     const mesidByIndex = outlineChatMesids(shown);       // 聊天条目的 ST messageID（见该函数注释）
     const wiEntriesAll = shown.flatMap(m => (isWiKind(m.kind) && Array.isArray(m.wiEntries)) ? m.wiEntries : []);
@@ -7289,13 +7052,28 @@ function renderContextOutlineList() {
     };
     // 聊天子行的正文预览：前 N 个字符（空白压成单空格）；视觉截断交给 CSS 省略号，全文进 title 悬停可见
     const previewOf = (m) => String(m.text ?? '').replace(/\s+/g, ' ').trim();
+    // 第二十九轮：检索命中高亮（从查看器平移过来的整窗检索）。
+    // 目录行是"一条消息一行"，所以高亮直接打在行的文本上；每个 <mark> 带全局递增的 data-hit，
+    // 上/下一个命中就按这个编号在 DOM 里定位（与旧的整窗检索同一套口径）。
+    let hitSeq = 0;
+    const mark = (text) => {
+        const r = highlightTextHtml(String(text ?? ''), ctxSearchTerm, { attr: 'data-hit', base: hitSeq });
+        hitSeq += r.count;
+        return r.html;
+    };
+    // 世界书消息行的「条目来源」图标（第二十九轮新增）：查看器删除后，原来的入口在查看器里；
+    // 现在挪到目录里世界书消息的项头行尾，点它开「条目来源」子窗（饼图 / 类型过滤 / 点条目看详情）。
+    const srcEntryBtn = (m) => (isWiKind(m.kind)
+        ? `<span class="hco-wi-src" title="查看这条世界书消息的条目来源（饼图 + 条目列表）">${HC_ICON_WI}</span>`
+        : '');
     // 项头（独立消息 / 世界书消息）：折叠箭头 + messageID + 来源 + 跳转图标 + tokens（带 t）。
     // 第二十八轮口径②：**不带角色 chip**；口径①：点头折叠、行尾图标跳转。
     const msgHeadHtml = (m) => `
             <div class="hco-head hco-row hco-collapsible" data-i="${m.i}" title="点击折叠/展开下方列表">
                 <span class="hco-caret">${HC_ICON_DOWN}</span>
                 ${mesidHtml(m)}
-                <span class="hco-src"${srcTitleAttr(m)}>${escapeHtmlText(srcOf(m))}</span>
+                <span class="hco-src"${srcTitleAttr(m)}>${mark(srcOf(m))}</span>
+                ${srcEntryBtn(m)}
                 <span class="hco-jump" title="跳到右侧内容区里这条消息的第一行">${HC_ICON_JUMP}</span>
                 <span class="hco-tokens">${Number(m.tokens) || 0} t</span>
             </div>`;
@@ -7306,7 +7084,7 @@ function renderContextOutlineList() {
             <div class="hco-kid hco-sub hco-row" data-i="${m.i}" title="点击跳到右侧内容区里这条消息的第一行">
                 ${mesidHtml(m)}
                 ${roleChip(m.role)}
-                <span class="hco-preview" title="${escapeHtmlText(full)}">${escapeHtmlText(full.slice(0, OUTLINE_PREVIEW_CHARS))}</span>
+                <span class="hco-preview" title="${escapeHtmlText(full)}">${mark(full.slice(0, OUTLINE_PREVIEW_CHARS))}${full.length > OUTLINE_PREVIEW_CHARS ? '…' : ''}</span>
                 <span class="hco-tokens">${Number(m.tokens) || 0}</span>
             </div>`;
     };
@@ -7354,9 +7132,15 @@ function renderContextOutlineList() {
             </div>`;
     }).join('');
 
+    // 检索命中计数：渲染时编好的 data-hit 一共多少个（顺序 = DOM 顺序 = 阅读顺序）
+    ctxHitCount = ctxSearchTerm.trim() ? listEl.querySelectorAll('mark[data-hit]').length : 0;
+    if (ctxHitCursor >= ctxHitCount) ctxHitCursor = ctxHitCount ? ctxHitCount - 1 : -1;
+    updateCtxCounts();
+
     // 交互（第二十八轮口径①）：
     //   · 项头 / 分组头（`.hco-collapsible`）→ 点击**折叠/展开**下方列表（不再直接跳转）；
     //   · 行尾"跳到正文"图标（`.hco-jump`）→ 仍跳转到那条/那组消息的第一行（不冒泡，免得连带折叠）；
+    //   · 世界书消息行尾的「条目来源」图标（`.hco-wi-src`）→ 开「条目来源」子窗；
     //   · 聊天子行（`.hco-kid.hco-row`）→ 点击跳到那条消息的第一行；
     //   · 条目行 → 滚到该条目正文的第一行。
     listEl.querySelectorAll('.hco-item').forEach(item => {
@@ -7368,6 +7152,14 @@ function renderContextOutlineList() {
                 const nowCollapsed = !ctxOutlineCollapsed.has(key);
                 if (nowCollapsed) ctxOutlineCollapsed.add(key); else ctxOutlineCollapsed.delete(key);
                 item.classList.toggle('hco-collapsed', nowCollapsed);
+            };
+        });
+        item.querySelectorAll('.hco-wi-src').forEach(icon => {
+            icon.onclick = (ev) => {
+                ev.stopPropagation();   // 别让父行的"折叠"一起触发
+                const row = icon.closest?.('.hco-row');
+                const ri = Number(row?.getAttribute?.('data-i'));
+                openWiMsgPopup(Number.isFinite(ri) ? ri : i);
             };
         });
         item.querySelectorAll('.hco-jump').forEach(icon => {
@@ -7390,6 +7182,10 @@ function renderContextOutlineList() {
             });
         });
     });
+    if (!shown.length) {
+        listEl.innerHTML = `<div class="tub-empty-state">当前筛选条件下没有消息。</div>`;
+    }
+    applyOutlineHitCursor();
     syncOutlineActiveHead();
     refreshOutlineEntryHighlight();   // 重绘后沿用"当前条目"高亮（行是新造的，类没了）
 }
@@ -7449,9 +7245,9 @@ function scrollMergedToElement(bodyEl, el) {
 }
 
 // 目录里点一条消息（`hco-item` / `hco-msg-head`）→ 内容区滚到**该条消息的第一行**。
-// 成对模式没开（理论到不了：目录只在成对模式里出现）时，退回旧的"查看器跳转"。
+// 只在成对窗口里出现；万一它已被收起（理论到不了），这里直接什么都不做。
 function jumpContextOutlineToMessage(i) {
-    if (!ctxMergeMode) { scrollContextViewerToMessage(i); return; }
+    if (!ctxMergeMode) return;
     const bodyEl = document.getElementById('hcm-body');
     const idx = Number(i);
     if (!bodyEl) return;
@@ -7559,6 +7355,15 @@ function syncOutlineFromMergedScroll() {
 // 依据：快照 `wiEntries[].pos` = `槽位序号 * 1e6 + 该条目第一个行锚点在槽位正文里的字符偏移`
 //       ⇒ `pos % 1e6` 就是条目正文起点的字符偏移；用 Range 量出它的纵坐标即可（与 scrollMergedToOffset 同一招）。
 // ⚠️ 槽位号与当前消息对不上的条目不参与（那条目在这条消息里没有可定位的正文）—— 宁可不亮，也不亮错。
+//
+// 第二十九轮（用户口径④"滚动定位还是不够准确，一下就跳好几个世界书条目"）三处修正：
+//   ① **逐槽位 pos**（见 computeRenderedStats 的 entrySlotFirstPos）：同一个条目在多条消息里都命中时，
+//      旧口径只保留"最早那条消息"的偏移，其他消息里的条目因此全部失去定位 → 剩下几个边界被拉得极开；
+//   ② **用锚点文本重新定位**（`wiEntries[].hint`）：pos 记的是"渲染后可见文本"里的偏移，而内容区显示的是
+//      **实际发送的字符**（可能被正则改写过）—— 一旦错位，旧代码 `Math.min(off, len-1)` 会把偏移**钳到最后一位**，
+//      于是好几条条目拿到同一个纵坐标、把边界抹平，滚动时就"一下跳好几个"。现在优先按锚点文本 indexOf；
+//   ③ **单调兜底**：仍然定位不到的条目不再"钳到末尾"，而是**跳过**；另外量出来的 top 必须满足
+//      `top >= 上一个条目的 top`，倒挂的一律跳过（倒挂 = 明显错位，宁可少亮一条也不乱亮）。
 function ensureEntryLayout(msgIdx) {
     if (!Number.isFinite(msgIdx)) return null;
     if (ctxEntryLayoutToken !== ctxMergedRenderToken) {
@@ -7574,22 +7379,47 @@ function ensureEntryLayout(msgIdx) {
     const m = ctxMsgByIndex.get(msgIdx);
     if (bodyEl && chunk && node && node.nodeType === 3 && m && Array.isArray(m.wiEntries) && m.wiEntries.length
         && typeof document.createRange === 'function') {
-        const len = String(node.nodeValue ?? '').length;
-        for (const e of m.wiEntries) {
-            const pos = Number(e.pos);
-            if (!Number.isFinite(pos)) continue;
-            const slot = Math.floor(pos / 1e6);
-            const off = pos - slot * 1e6;
-            if (slot !== msgIdx || off < 0) continue;
+        const text = String(node.nodeValue ?? '');
+        const len = text.length;
+        const bodyTop = bodyEl.getBoundingClientRect().top;
+        const lower = text.toLowerCase();
+        // 字符偏移 → 内容区坐标系里的纵坐标（量不到就返回 null）
+        const topAt = (at) => {
+            if (!(at >= 0) || at >= len) return null;
             try {
-                const at = Math.min(off, Math.max(0, len - 1));
                 const range = document.createRange();
                 range.setStart(node, at);
                 range.setEnd(node, Math.min(at + 1, len));
                 const r = range.getBoundingClientRect();
-                if (!Number.isFinite(r.top)) continue;
-                out.push({ uid: String(e.uid ?? ''), top: r.top - bodyEl.getBoundingClientRect().top + bodyEl.scrollTop });
-            } catch (err) { /* 单条量不到就跳过 */ }
+                if (!Number.isFinite(r.top)) return null;
+                return r.top - bodyTop + bodyEl.scrollTop;
+            } catch (err) {
+                return null;
+            }
+        };
+        for (const e of m.wiEntries) {
+            const pos = Number(e.pos);
+            const slot = Number.isFinite(pos) ? Math.floor(pos / 1e6) : null;
+            const off = Number.isFinite(pos) ? (pos - slot * 1e6) : null;
+            if (slot !== null && slot !== msgIdx) continue;   // 这条条目不属于这条消息
+            // ① 先用锚点文本在本条消息的正文里找起点（最可靠：与实际发送的字符逐字对应）
+            let at = -1;
+            const hint = String(e.hint ?? '').trim();
+            if (hint) {
+                at = lower.indexOf(hint.toLowerCase());
+                if (at < 0) {
+                    const firstLine = hint.split(/\r?\n/).map(l => l.trim()).find(Boolean) || '';
+                    if (firstLine) at = lower.indexOf(firstLine.toLowerCase());
+                }
+            }
+            // ② 锚点找不到（被正则大幅改写）才退回 pos 偏移；**不再钳到末尾**
+            if (at < 0 && Number.isFinite(off) && off < len) at = off;
+            if (at < 0) continue;
+            const top = topAt(at);
+            if (top === null) continue;
+            // ③ 单调兜底：与上一条相比倒挂（明显错位）→ 跳过，宁缺毋滥
+            if (out.length && top < out[out.length - 1].top) continue;
+            out.push({ uid: String(e.uid ?? ''), top });
         }
         out.sort((a, b) => a.top - b.top);
     }
@@ -7601,6 +7431,9 @@ function ensureEntryLayout(msgIdx) {
 // 判定：容器顶的内容坐标 `body.scrollTop` 落在哪个条目的 [top, 下一个条目 top) 里，就高亮哪个条目行；
 //      落在第一个条目之前（= 该消息正文的开头，前面没有条目正文）→ 只亮消息行，不亮任何条目。
 // ⚠️ 只有"当前条目"变了才动 DOM（每帧都加/删类会抖）；条目行同样要滚到看得见（scrollIntoViewWithin）。
+// 第二十九轮口径④：判定改成"**容器顶下方第一条还没滚过去的条目**"（与消息块用的是同一套语义），
+//   并且加了 4px 容差 —— 原来用 `e.top <= st`（st 带 +4 容差）找"最后一个已越过的条目"，
+//   在条目边界附近容器顶刚越过某条时就会立刻改亮下一条，滚动一点、跳一条，观感就是"一下跳好几个"。
 function syncOutlineEntryActive(i, chunkEl, force = false) {
     const listEl = document.getElementById('hco-body');
     const bodyEl = document.getElementById('hcm-body');
@@ -7608,13 +7441,15 @@ function syncOutlineEntryActive(i, chunkEl, force = false) {
     const layout = (i !== null && Number.isFinite(i)) ? ensureEntryLayout(i) : null;
     let hit = null;
     if (layout && layout.length && chunkEl) {
-        const st = bodyEl.scrollTop + 4;   // 与"第一条还看得见的块"同一档容差
-        for (const e of layout) { if (e.top <= st) hit = e; else break; }
-        // 容器顶已经落进这条消息的"框"里、但还在第一个条目的正文之前（= 这条消息正文的开头，
-        // `<pre>` 自带的那点上内边距也算）→ 亮**第一条**：否则刚滚到消息开头那一小段谁都不亮，
-        // 观感像"没反应"。容器顶还停在**上一条**消息里时（块顶在容器顶下方）不亮。
-        // ⚠️ 容差取 4px，与"第一条还看得见的块"同一档：点消息行跳过来时容器顶就落在块顶上方 4px。
-        if (!hit && chunkEl.getBoundingClientRect().top <= bodyEl.getBoundingClientRect().top + 4) hit = layout[0];
+        const st = bodyEl.scrollTop;
+        // 容器顶**已经进入**这条消息的框里（块顶在容器顶上方，允许 4px 入场容差）才判条目
+        const inside = chunkEl.getBoundingClientRect().top <= bodyEl.getBoundingClientRect().top + 4;
+        if (inside) {
+            hit = layout[0];                               // 默认亮第一条（刚滚到消息开头时"有反应"）
+            for (const e of layout) {                       // 越过一条就往下推一条
+                if (e.top <= st + 4) hit = e; else break;
+            }
+        }
     }
     const key = hit ? `${i}|${hit.uid}` : '';
     if (!force && key === ctxOutlineActiveEntry) return;
@@ -7635,34 +7470,6 @@ function refreshOutlineEntryHighlight() {
     const bodyEl = document.getElementById('hcm-body');
     const chunk = bodyEl?.querySelector(`.hcm-chunk[data-i="${ctxOutlineActiveIndex}"]`);
     if (chunk) syncOutlineEntryActive(ctxOutlineActiveIndex, chunk, true);
-}
-
-// 点击目录里的消息头 → **查看器**滚动到该消息并高亮（成对模式不在时的兜底路径）。
-// "点了一定跳得到"：该消息若被查看器的筛选藏住了，先把筛选复位到「全部」再定位。
-function scrollContextViewerToMessage(i) {
-    const bodyEl = document.getElementById('hide-context-body');
-    if (!bodyEl) return;
-    const viewerEl = document.getElementById('hide-helper-context-viewer');
-    if (viewerEl && viewerEl.style.display === 'none') {
-        focusChildPopup('hide-helper-context-viewer');
-        viewerEl.style.display = 'flex';
-        positionChildPopup(viewerEl, {});
-    }
-    let row = bodyEl.querySelector(`.hc-msg[data-i="${i}"]`);
-    if (!row && (ctxSourceFilter !== 'all' || ctxRoleFilter !== 'all')) {
-        ctxSourceFilter = 'all';
-        ctxRoleFilter = 'all';
-        syncCtxFilterButtons();
-        renderContextList();   // 会顺带刷新目录 → 行要在这之后重新取
-        row = bodyEl.querySelector(`.hc-msg[data-i="${i}"]`);
-    }
-    if (!row) return;
-    bodyEl.querySelectorAll('.hc-msg-target').forEach(el => el.classList.remove('hc-msg-target'));
-    row.classList.add('hc-msg-target');
-    // 只滚查看器自己的滚动容器（见 scrollIntoViewWithin 的注释：**绝不能**用 scrollIntoView，
-    // 否则会连带滚文档 → 整个插件 UI 跟着整页上移，用户实测踩过）
-    scrollIntoViewWithin(bodyEl, row, 'start');
-    syncOutlineActiveHead(Number(i));
 }
 
 // ==================== 聊天统计功能结束 ====================
@@ -8572,7 +8379,10 @@ function setupEventListeners() {
         pendingReplyAnchor = null; // 挂起中的 normal 锚定也不跨聊天
         closeEntryPopup(); // 条目详情子弹窗跟随主弹窗数据，切聊天即关闭
         closeChatStatsPopup(); // 「聊天」统计子弹窗同理
-        closeContextViewer(); // 完整上下文查看器：快照只属于原聊天，切聊天即关闭
+        ctxDump = null; // 完整上下文（目录 + 内容）渲染的是原聊天的快照：切聊天即失效（随 closeChildStack 收起）
+        ctxMsgByIndex = new Map();
+        wiMsgPopupIndex = null;
+        wiMsgPopupMsg = null;
         closeChildStack(); // 切聊天 = **重置**：整轮层级结束（不是"退一层"）
 
         updateCurrentHideSettingsDisplay(); // 更新所有UI
